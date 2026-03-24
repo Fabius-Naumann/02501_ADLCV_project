@@ -18,7 +18,7 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.115.6",
+    "fastapi==0.135.2",
     "torch>=2.10",
     "torchinfo>=1.8",
     "torchvision>=0.25.0",
