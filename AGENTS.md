@@ -23,6 +23,7 @@
 * Use f-strings for formatting.
 * Use type hints
 * Do not add inline comments unless absolutely necessary.
+* Assure alignment with linting (ruff)
 
 # Documentation
 
