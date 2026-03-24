@@ -23,7 +23,7 @@ dependencies = [
     "torchinfo>=1.8",
     "torchvision>=0.25.0",
     "typer==0.15.1",
-    "uvicorn==0.34.0",
+    "uvicorn==0.42.0",
 ]
 
 [dependency-groups]
