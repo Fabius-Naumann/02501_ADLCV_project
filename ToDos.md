@@ -17,6 +17,6 @@
 [] design text-from-vision \
 [] design set-of-mark + visual examples \
 [] evaluate all strategies with 1- and 5-shot settings on novel classes \
-[] comparison with results from task 1 
+[] comparison with results from task 1
 
 **Task 3**
