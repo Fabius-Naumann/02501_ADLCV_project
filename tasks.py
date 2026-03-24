@@ -20,26 +20,6 @@ def train(ctx: Context) -> None:
     ctx.run(f"uv run src/{PROJECT_NAME}/train.py", echo=True, pty=not WINDOWS)
 
 
-@task
-def test(ctx: Context) -> None:
-    """Run tests."""
-    ctx.run("uv run coverage run -m pytest tests/", echo=True, pty=not WINDOWS)
-    ctx.run("uv run coverage report -m -i", echo=True, pty=not WINDOWS)
-
-
-@task
-def docker_build(ctx: Context, progress: str = "plain") -> None:
-    """Build docker images."""
-    ctx.run(
-        f"docker build -t train:latest . -f dockerfiles/train.dockerfile --progress={progress}",
-        echo=True,
-        pty=not WINDOWS,
-    )
-    ctx.run(
-        f"docker build -t api:latest . -f dockerfiles/api.dockerfile --progress={progress}", echo=True, pty=not WINDOWS
-    )
-
-
 # Documentation commands
 @task
 def build_docs(ctx: Context) -> None:

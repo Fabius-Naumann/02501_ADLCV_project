@@ -3,8 +3,8 @@ from detgpt.model import Model
 
 
 def train():
-    dataset = MyDataset("data/raw")
-    model = Model()
+    dataset = MyDataset("data/raw")  # noqa: F841
+    model = Model()  # noqa: F841
     # add rest of your training code here
 
 

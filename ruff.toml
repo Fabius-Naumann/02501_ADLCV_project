@@ -32,7 +32,7 @@ preview = false
 [lint.isort]
 combine-as-imports = true
 force-sort-within-sections = false
-known-first-party = ["sign_ml"]
+known-first-party = ["detgpt"]
 known-third-party = ["wandb"]
 
 [format]

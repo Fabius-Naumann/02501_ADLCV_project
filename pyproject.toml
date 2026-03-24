@@ -18,49 +18,43 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.135.2",
+    "fastapi>=0.135.2",
     "torch>=2.10",
     "torchinfo>=1.8",
     "torchvision>=0.25.0",
-    "typer==0.15.1",
-    "uvicorn==0.42.0",
+    "typer>=0.15.1",
+    "uvicorn>=0.42.0",
 ]
 
 [dependency-groups]
 dev = [
-    "coverage==7.13.5",
-    "invoke==2.2.0",
-    "pre-commit==4.5.1",
-    "pytest==8.3.4",
-    "ruff==0.15.7",
-    "mypy==1.19.1",
-    "mkdocs-material==9.7.1",
-    "mkdocstrings-python==2.0.1",
+    "invoke>=2.2.0",
+    "pre-commit>=4.5.1",
+    "ruff>=0.15.7",
+    "mkdocs-material>=9.7.1",
+    "mkdocstrings-python>=2.0.1",
 ]
 
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cu126", marker = "sys_platform != 'darwin'" },
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 torchvision = [
-  { index = "pytorch-cu130", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cu126", marker = "sys_platform != 'darwin'" },
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
-
-[tool.ruff]
-line-length = 120
 
 [tool.coverage.run]
 omit = ["tests/*"]
