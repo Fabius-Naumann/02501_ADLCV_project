@@ -134,9 +134,7 @@ class Task1DetectionDataset(_LvisDataset):
         sample = super().__getitem__(index)
         raw_local_path = sample.get("local_path")
         if not raw_local_path:
-            raise ValueError(
-                f"Sample {sample.get('image_id')} has no usable 'local_path' in the manifest."
-            )
+            raise ValueError(f"Sample {sample.get('image_id')} has no usable 'local_path' in the manifest.")
         local_path = Path(raw_local_path)
         if not local_path.is_file():
             raise FileNotFoundError(
