@@ -19,6 +19,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.135.2",
+    "loguru>=0.7.3",
+    "lvis",
+    "pycocotools>=2.0.11",
     "torch>=2.10",
     "torchinfo>=1.8",
     "torchvision>=0.25.0",
@@ -35,6 +38,11 @@ dev = [
     "mkdocstrings-python>=2.0.1",
 ]
 
+[tool.uv]
+preview = true
+
+[tool.uv.extra-build-dependencies]
+lvis = ["pip"]
 
 [tool.uv.sources]
 torch = [
@@ -45,6 +53,7 @@ torchvision = [
   { index = "pytorch-cu126", marker = "sys_platform != 'darwin'" },
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
+lvis = { git = "https://github.com/lvis-dataset/lvis-api.git" }
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
