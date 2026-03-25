@@ -12,7 +12,9 @@ import typer
 from loguru import logger
 from lvis import LVIS
 
-from detgpt import PROCESSED_DIR, RAW_DIR
+from detgpt import PROCESSED_DIR, RAW_DIR, init_data_dirs
+
+init_data_dirs()
 
 LVIS_ANNOTATION_URLS = {
     "train": "https://s3-us-west-2.amazonaws.com/dl.fbaipublicfiles.com/LVIS/lvis_v1_train.json.zip",
