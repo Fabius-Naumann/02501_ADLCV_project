@@ -1,3 +1,14 @@
+# additional custom ignores
+data/**
+!data/.gitkeep
+outputs/**
+!outputs/.gitkeep
+!outputs/figures/
+!outputs/figures/.gitkeep
+models/**
+!models/.gitkeep
+
+
 docs/site/
 
 # test cache
