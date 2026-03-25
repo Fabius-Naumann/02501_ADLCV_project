@@ -132,9 +132,16 @@ class Task1DetectionDataset(_LvisDataset):
             Tuple ``(image, target)`` where ``image`` is ``C x H x W``.
         """
         sample = super().__getitem__(index)
-        local_path = Path(sample.get("local_path", ""))
-        if not local_path.exists():
-            raise FileNotFoundError(f"Image file not found for sample {sample.get('image_id')}: {local_path}")
+        raw_local_path = sample.get("local_path")
+        if not raw_local_path:
+            raise ValueError(
+                f"Sample {sample.get('image_id')} has no usable 'local_path' in the manifest."
+            )
+        local_path = Path(raw_local_path)
+        if not local_path.is_file():
+            raise FileNotFoundError(
+                f"Image file not found or not a file for sample {sample.get('image_id')}: {local_path}"
+            )
 
         image = read_image(str(local_path), mode=ImageReadMode.RGB)
         if self.to_float:
