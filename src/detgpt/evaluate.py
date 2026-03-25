@@ -141,3 +141,110 @@ def run_task1_baseline(
 
 if __name__ == "__main__":
     typer.run(run_task1_baseline)
+
+
+def cxcywh_to_xyxy(box):
+    cx, cy, w, h = box
+    x1 = cx - w / 2
+    y1 = cy - h / 2
+    x2 = cx + w / 2
+    y2 = cy + h / 2
+    return [x1, y1, x2, y2]
+
+
+def compute_iou(box1, box2):
+    box1 = cxcywh_to_xyxy(box1)
+    box2 = cxcywh_to_xyxy(box2)
+
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    union = area1 + area2 - inter_area
+
+    if union == 0:
+        return 0.0
+
+    return inter_area / union
+
+
+def evaluate_image(pred, gt, iou_threshold=0.5):
+    matched = set()
+    tp = 0
+    fp = 0
+
+    for p_box, p_label in zip(pred["boxes"], pred["labels"], strict=False):
+        found_match = False
+
+        for i, (g_box, g_label) in enumerate(zip(gt["boxes"], gt["labels"], strict=False)):
+            if i in matched:
+                continue
+
+            if p_label != g_label:
+                continue
+
+            iou = compute_iou(p_box, g_box)
+
+            if iou >= iou_threshold:
+                tp += 1
+                matched.add(i)
+                found_match = True
+                break
+
+        if not found_match:
+            fp += 1
+
+    fn = len(gt["boxes"]) - len(matched)
+
+    return {"tp": tp, "fp": fp, "fn": fn}
+
+
+def compute_precision_recall(tp, fp, fn):
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    return precision, recall
+
+
+def evaluate_dataset(predictions, ground_truth):
+    total_tp = total_fp = total_fn = 0
+
+    for pred, gt in zip(predictions, ground_truth, strict=False):
+        res = evaluate_image(pred, gt)
+        total_tp += res["tp"]
+        total_fp += res["fp"]
+        total_fn += res["fn"]
+
+    precision, recall = compute_precision_recall(total_tp, total_fp, total_fn)
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "tp": total_tp,
+        "fp": total_fp,
+        "fn": total_fn,
+    }
+
+
+if __name__ == "__main__":
+    predictions = [
+        {
+            "boxes": [[142, 92, 192, 95]],
+            "labels": ["car"],
+        }
+    ]
+
+    ground_truth = [
+        {
+            "boxes": [[140, 90, 190, 100]],
+            "labels": ["car"],
+        }
+    ]
+
+    results = evaluate_dataset(predictions, ground_truth)
+    print(results)
