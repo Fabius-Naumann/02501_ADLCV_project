@@ -49,15 +49,13 @@ class GroundingDINOHandler:
             outputs = self.model(**inputs)
 
         # 3. Post-process to get boxes in pixel coordinates
-        results = self.processor.post_process_grounded_object_detection(
+        return self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
             threshold=threshold,
             text_threshold=threshold,
             target_sizes=[image_pil.size[::-1]],
-        )[0]
-
-        return results  # Contains 'boxes', 'scores', 'labels'
+        )[0]  # Contains 'boxes', 'scores', 'labels'
 
 
 if __name__ == "__main__":

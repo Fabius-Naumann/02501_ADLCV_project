@@ -32,7 +32,7 @@ def main():
     )
 
     # Test the loader
-    images, targets = next(iter(data_loader))
+    images, _targets = next(iter(data_loader))
     print(f"Batch size: {len(images)}")
 
     # Define where to save the test image

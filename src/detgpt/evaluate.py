@@ -33,7 +33,7 @@ def save_prediction_results(
     # Convert tensor to [H, W, C] for matplotlib
     ax.imshow(image.permute(1, 2, 0).cpu().numpy())
 
-    for box, label, score in zip(boxes, labels, scores):
+    for box, label, score in zip(boxes, labels, scores, strict=False):
         xmin, ymin, xmax, ymax = box.tolist()
         width, height = xmax - xmin, ymax - ymin
         score_value = score.item()
@@ -48,7 +48,7 @@ def save_prediction_results(
             f"{label}: {score_value:.2f}",
             color="white",
             fontsize=10,
-            bbox=dict(facecolor="lime", alpha=0.5),
+            bbox={"facecolor": "lime", "alpha": 0.5},
         )
 
     ax.set_title(title)
@@ -132,7 +132,7 @@ def run_task1_baseline(
     # 6. Finalize Results
     if save_results and summary_data:
         csv_path = run_dir / "detections_summary.csv"
-        with open(csv_path, "w", newline="") as f:
+        with csv_path.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["image_id", "num_gt", "num_pred", "categories", "avg_score"])
             writer.writeheader()
             writer.writerows(summary_data)
