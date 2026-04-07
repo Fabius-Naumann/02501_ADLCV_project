@@ -1,7 +1,6 @@
-from pathlib import Path
-
 from torch.utils.data import DataLoader
 
+from detgpt import FIGURES_DIR
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.visualize import save_detection_samples
 
@@ -36,7 +35,7 @@ def main():
     print(f"Batch size: {len(images)}")
 
     # Define where to save the test image
-    output_path = Path("outputs/figures")
+    output_path = FIGURES_DIR
 
     # Run your visualization code for the first image
     save_detection_samples(dataset, output_path, num_samples=1)
