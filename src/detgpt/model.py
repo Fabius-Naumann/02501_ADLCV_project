@@ -1,7 +1,8 @@
 import torch
-from torch import nn, Tensor
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from torch import Tensor, nn
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
 
 class Model(nn.Module):
     """Just a dummy model to show how to structure your code"""
@@ -12,6 +13,7 @@ class Model(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layer(x)
+
 
 class GroundingDINOHandler:
     """Wrapper for Grounding DINO zero-shot object detection."""
@@ -25,7 +27,7 @@ class GroundingDINOHandler:
     def predict(self, image_tensor: Tensor, category_names: list[str], threshold: float = 0.3):
         """
         Run inference on a single image tensor.
-        
+
         Args:
             image_tensor: C x H x W tensor from Task1DetectionDataset.
             category_names: List of labels to find (e.g., ["cat", "dog"]).
@@ -33,12 +35,12 @@ class GroundingDINOHandler:
         """
         # 1. Format text prompt: Grounding DINO prefers "item1 . item2 . item3 ."
         text_prompt = ". ".join(list(set(category_names))) + "."
-        
+
         # 2. Convert tensor back to PIL for the processor
         # (Processor handles normalization and resizing internally)
         image_pil = Image.fromarray((image_tensor.permute(1, 2, 0).numpy() * 255).astype("uint8"))
         inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
-        
+
         with torch.no_grad():
             outputs = self.model(**inputs)
 
@@ -48,10 +50,11 @@ class GroundingDINOHandler:
             inputs.input_ids,
             threshold=threshold,
             text_threshold=threshold,
-            target_sizes=[image_pil.size[::-1]]
+            target_sizes=[image_pil.size[::-1]],
         )[0]
 
-        return results # Contains 'boxes', 'scores', 'labels'
+        return results  # Contains 'boxes', 'scores', 'labels'
+
 
 if __name__ == "__main__":
     model = Model()

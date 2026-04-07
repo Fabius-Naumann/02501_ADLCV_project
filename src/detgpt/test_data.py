@@ -1,13 +1,15 @@
-from detgpt.data import Task1DetectionDataset, task1_collate_fn
-from torch.utils.data import DataLoader
 from pathlib import Path
+
+from torch.utils.data import DataLoader
+
+from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.visualize import save_detection_samples
 
 # 1. Initialize the dataset for Task 1 (Zero-shot)
 # We use the 'val' split since Task 1 is an evaluation task
 dataset = Task1DetectionDataset(
-    split="val", 
-    to_float=True  # Converts images to [0, 1] range
+    split="val",
+    to_float=True,  # Converts images to [0, 1] range
 )
 
 print(f"Dataset initialized with {len(dataset)} samples.")
@@ -24,7 +26,7 @@ data_loader = DataLoader(
     dataset,
     batch_size=4,
     shuffle=False,
-    collate_fn=task1_collate_fn  # Essential for handling variable object counts
+    collate_fn=task1_collate_fn,  # Essential for handling variable object counts
 )
 
 # Test the loader

@@ -19,7 +19,7 @@ The dataset implementation in `data.py` is designed for **Task 1: Zero-shot Perf
 ### Coordinate Transformation
 To support the spatial reasoning capabilities of VLMs, we transform raw LVIS bounding boxes into center-normalized coordinates:
 * **Input**: $[x_{min}, y_{min}, width, height]$
-* **Transformation**: 
+* **Transformation**:
   $$x_{center} = x_{min} + \frac{width}{2}$$
   $$y_{center} = y_{min} + \frac{height}{2}$$
 * **Output**: The `_extract_bbox_xcycwh` method returns these as a unified tensor for the detector.
