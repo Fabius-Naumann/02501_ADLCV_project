@@ -23,6 +23,7 @@ class GroundingDINOHandler:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
+        self.model.eval()
 
     def predict(self, image_tensor: Tensor, category_names: list[str], threshold: float = 0.3):
         """
@@ -34,11 +35,14 @@ class GroundingDINOHandler:
             threshold: Confidence threshold for detections.
         """
         # 1. Format text prompt: Grounding DINO prefers "item1 . item2 . item3 ."
-        text_prompt = ". ".join(list(set(category_names))) + "."
+        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
+        unique_category_names = list(dict.fromkeys(cleaned_category_names))
+        text_prompt = ". ".join(unique_category_names) + "."
 
         # 2. Convert tensor back to PIL for the processor
         # (Processor handles normalization and resizing internally)
-        image_pil = Image.fromarray((image_tensor.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
         inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():

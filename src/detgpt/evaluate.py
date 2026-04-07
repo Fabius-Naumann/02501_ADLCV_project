@@ -36,13 +36,19 @@ def save_prediction_results(
     for box, label, score in zip(boxes, labels, scores):
         xmin, ymin, xmax, ymax = box.tolist()
         width, height = xmax - xmin, ymax - ymin
+        score_value = score.item()
 
         rect = Rectangle((xmin, ymin), width, height, edgecolor="lime", facecolor="none", linewidth=2)
         ax.add_patch(rect)
 
         # Add label with confidence score
         ax.text(
-            xmin, ymin - 5, f"{label}: {score:.2f}", color="white", fontsize=10, bbox=dict(facecolor="lime", alpha=0.5)
+            xmin,
+            ymin - 5,
+            f"{label}: {score_value:.2f}",
+            color="white",
+            fontsize=10,
+            bbox=dict(facecolor="lime", alpha=0.5),
         )
 
     ax.set_title(title)
@@ -55,7 +61,7 @@ def run_task1_baseline(
     save_viz: bool = typer.Option(False, help="Whether to save detection-image overlays."),
     limit: int = typer.Option(20, help="Number of samples to evaluate for testing."),
     model_id: str = typer.Option("IDEA-Research/grounding-dino-tiny", help="HF Model ID."),
-):
+) -> None:
     """
     Evaluate Grounding DINO on Task 1.
     Results are saved in a timestamped folder to prevent overwriting.
@@ -82,7 +88,14 @@ def run_task1_baseline(
 
         image, target = images[0], targets[0]
         img_id = target["image_id"].item()
-        query_categories = list(set(target["category_names"]))
+        query_categories = []
+        seen_categories = set()
+        for category_name in target["category_names"]:
+            normalized_category_name = category_name.strip()
+            if not normalized_category_name or normalized_category_name in seen_categories:
+                continue
+            seen_categories.add(normalized_category_name)
+            query_categories.append(normalized_category_name)
 
         if not query_categories:
             continue
