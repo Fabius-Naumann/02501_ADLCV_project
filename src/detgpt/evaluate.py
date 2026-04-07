@@ -56,93 +56,6 @@ def save_prediction_results(
     _save_or_show_figure(fig, output_path)
 
 
-def run_task1_baseline(
-    save_results: bool = typer.Option(True, help="Whether to save the CSV summary."),
-    save_viz: bool = typer.Option(False, help="Whether to save detection-image overlays."),
-    limit: int = typer.Option(20, help="Number of samples to evaluate for testing."),
-    model_id: str = typer.Option("IDEA-Research/grounding-dino-tiny", help="HF Model ID."),
-) -> None:
-    """
-    Evaluate Grounding DINO on Task 1.
-    Results are saved in a timestamped folder to prevent overwriting.
-    """
-    # 1. Setup timestamped output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = OUTPUTS_DIR / "task1_results" / f"run_{timestamp}"
-
-    if save_results or save_viz:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Created output directory: {run_dir}")
-
-    # 2. Initialize Data and Model
-    dataset = Task1DetectionDataset(split="val", to_float=True)
-    data_loader = DataLoader(dataset, batch_size=1, collate_fn=task1_collate_fn)
-    detector = GroundingDINOHandler(model_id=model_id)
-
-    summary_data = []
-
-    # 3. Inference Loop
-    for i, (images, targets) in enumerate(data_loader):
-        if i >= limit:
-            break
-
-        image, target = images[0], targets[0]
-        img_id = target["image_id"].item()
-        query_categories = []
-        seen_categories = set()
-        for category_name in target["category_names"]:
-            normalized_category_name = category_name.strip()
-            if not normalized_category_name or normalized_category_name in seen_categories:
-                continue
-            seen_categories.add(normalized_category_name)
-            query_categories.append(normalized_category_name)
-
-        if not query_categories:
-            continue
-
-        detections = detector.predict(image, query_categories)
-
-        # 4. Optional Visualization
-        if save_viz:
-            viz_dir = run_dir / "visualizations"
-            viz_dir.mkdir(exist_ok=True)
-            pred_phrases = detections.get("labels", ["object"] * len(detections["boxes"]))
-
-            save_prediction_results(
-                image=image,
-                boxes=detections["boxes"],
-                labels=pred_phrases,
-                scores=detections["scores"],
-                output_path=viz_dir / f"pred_{img_id}.png",
-                title=f"DINO Zero-Shot: Image {img_id}",
-            )
-
-        # 5. Collect Data
-        if save_results:
-            summary_data.append(
-                {
-                    "image_id": img_id,
-                    "num_gt": len(target["boxes"]),
-                    "num_pred": len(detections["boxes"]),
-                    "categories": "|".join(query_categories),
-                    "avg_score": torch.mean(detections["scores"]).item() if len(detections["scores"]) > 0 else 0,
-                }
-            )
-
-    # 6. Finalize Results
-    if save_results and summary_data:
-        csv_path = run_dir / "detections_summary.csv"
-        with csv_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["image_id", "num_gt", "num_pred", "categories", "avg_score"])
-            writer.writeheader()
-            writer.writerows(summary_data)
-        logger.info(f"Summary saved to {csv_path}")
-
-
-if __name__ == "__main__":
-    typer.run(run_task1_baseline)
-
-
 def cxcywh_to_xyxy(box):
     cx, cy, w, h = box
     x1 = cx - w / 2
@@ -231,20 +144,105 @@ def evaluate_dataset(predictions, ground_truth):
     }
 
 
+def run_task1_baseline(
+    save_results: bool = typer.Option(True, help="Whether to save the CSV summary."),
+    save_viz: bool = typer.Option(False, help="Whether to save detection-image overlays."),
+    limit: int = typer.Option(20, help="Number of samples to evaluate for testing."),
+    model_id: str = typer.Option("IDEA-Research/grounding-dino-tiny", help="HF Model ID."),
+) -> None:
+    """
+    Evaluate Grounding DINO on Task 1.
+    Results are saved in a timestamped folder to prevent overwriting.
+    """
+    # 1. Setup timestamped output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = OUTPUTS_DIR / "task1_results" / f"run_{timestamp}"
+
+    if save_results or save_viz:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created output directory: {run_dir}")
+
+    # 2. Initialize Data and Model
+    dataset = Task1DetectionDataset(split="val", to_float=True)
+    data_loader = DataLoader(dataset, batch_size=1, collate_fn=task1_collate_fn)
+    detector = GroundingDINOHandler(model_id=model_id)
+
+    summary_data = []
+
+    # 3. Inference Loop
+    for i, (images, targets) in enumerate(data_loader):
+        if i >= limit:
+            break
+
+        image, target = images[0], targets[0]
+        img_id = target["image_id"].item()
+        query_categories = []
+        seen_categories = set()
+        for category_name in target["category_names"]:
+            normalized_category_name = category_name.strip()
+            if not normalized_category_name or normalized_category_name in seen_categories:
+                continue
+            seen_categories.add(normalized_category_name)
+            query_categories.append(normalized_category_name)
+
+        if not query_categories:
+            continue
+
+        detections = detector.predict(image, query_categories)
+
+        # 4. Optional Visualization
+        if save_viz:
+            viz_dir = run_dir / "visualizations"
+            viz_dir.mkdir(exist_ok=True)
+            pred_phrases = detections.get("labels", ["object"] * len(detections["boxes"]))
+
+            save_prediction_results(
+                image=image,
+                boxes=detections["boxes"],
+                labels=pred_phrases,
+                scores=detections["scores"],
+                output_path=viz_dir / f"pred_{img_id}.png",
+                title=f"DINO Zero-Shot: Image {img_id}",
+            )
+
+        # 5. Collect Data
+        if save_results:
+            summary_data.append(
+                {
+                    "image_id": img_id,
+                    "num_gt": len(target["boxes"]),
+                    "num_pred": len(detections["boxes"]),
+                    "categories": "|".join(query_categories),
+                    "avg_score": torch.mean(detections["scores"]).item() if len(detections["scores"]) > 0 else 0,
+                }
+            )
+
+    # 6. Finalize Results
+    if save_results and summary_data:
+        csv_path = run_dir / "detections_summary.csv"
+        with csv_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["image_id", "num_gt", "num_pred", "categories", "avg_score"])
+            writer.writeheader()
+            writer.writerows(summary_data)
+        logger.info(f"Summary saved to {csv_path}")
+
+
 if __name__ == "__main__":
-    predictions = [
-        {
-            "boxes": [[142, 92, 192, 95]],
-            "labels": ["car"],
-        }
-    ]
+    typer.run(run_task1_baseline)
 
-    ground_truth = [
-        {
-            "boxes": [[140, 90, 190, 100]],
-            "labels": ["car"],
-        }
-    ]
+    # predictions = [
+    #     {
+    #         "boxes": [[142, 92, 192, 95]],
+    #         "labels": ["car"],
+    #     }
+    # ]
 
-    results = evaluate_dataset(predictions, ground_truth)
-    print(results)
+    # ground_truth = [
+    #     {
+    #         "boxes": [[140, 90, 190, 100]],
+    #         "labels": ["car"],
+    #     }
+    # ]
+
+    # results = evaluate_dataset(predictions, ground_truth)
+    # print(results)
