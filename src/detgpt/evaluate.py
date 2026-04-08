@@ -132,6 +132,7 @@ def _open_qwen_debug_trace_file(
     if normalized_backend != "qwen_vlm" or not qwen_debug_dump:
         return None, None
 
+    run_dir.mkdir(parents=True, exist_ok=True)
     debug_trace_path = run_dir / "qwen_debug_trace.jsonl"
     debug_file_handle = debug_trace_path.open("w", encoding="utf-8")
     logger.info(f"Qwen debug trace enabled: {debug_trace_path}")
@@ -352,7 +353,7 @@ def run_task1_baseline(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / "task1_results" / f"run_{timestamp}"
 
-    if save_results or save_viz:
+    if save_results or save_viz or qwen_debug_dump:
         run_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created output directory: {run_dir}")
 

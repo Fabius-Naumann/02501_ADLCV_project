@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from detgpt.box_utils import compute_iou_cxcywh
@@ -21,16 +22,24 @@ def compute_precision_recall(tp: int, fp: int, fn: int) -> tuple[float, float]:
     return precision, recall
 
 
-def validate_record(record: dict[str, Any], require_scores: bool = False) -> None:
-    """Validate a prediction or ground-truth record.
+def _validate_finite_numeric(value: Any, field_name: str) -> float:
+    """Validate that a value can be interpreted as a finite float."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be numeric, but received bool.")
 
-    Args:
-        record: Input record.
-        require_scores: Whether the record must include scores.
+    try:
+        float_value = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be numeric.") from error
 
-    Raises:
-        ValueError: If the record has an invalid structure.
-    """
+    if not math.isfinite(float_value):
+        raise ValueError(f"{field_name} must be finite.")
+
+    return float_value
+
+
+def _validate_boxes_and_labels(record: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    """Validate and return the required boxes/labels fields."""
     required_keys = {"boxes", "labels"}
     missing = required_keys - set(record)
     if missing:
@@ -48,16 +57,42 @@ def validate_record(record: dict[str, Any], require_scores: bool = False) -> Non
     for box in boxes:
         if not isinstance(box, list) or len(box) != 4:
             raise ValueError("Each box must be a list of four numbers in cxcywh format.")
+        for coordinate in box:
+            _validate_finite_numeric(coordinate, "Box coordinate")
 
+    return boxes, labels
+
+
+def _validate_scores(record: dict[str, Any], boxes: list[Any], require_scores: bool) -> None:
+    """Validate prediction scores if required or present."""
     should_validate_scores = require_scores or "scores" in record
-    if should_validate_scores:
-        if "scores" not in record:
-            raise ValueError("Prediction record must include 'scores'.")
-        scores = record["scores"]
-        if not isinstance(scores, list):
-            raise ValueError("Prediction field 'scores' must be a list.")
-        if len(scores) != len(boxes):
-            raise ValueError("Prediction fields 'boxes' and 'scores' must have the same length.")
+    if not should_validate_scores:
+        return
+
+    if "scores" not in record:
+        raise ValueError("Prediction record must include 'scores'.")
+    scores = record["scores"]
+    if not isinstance(scores, list):
+        raise ValueError("Prediction field 'scores' must be a list.")
+    if len(scores) != len(boxes):
+        raise ValueError("Prediction fields 'boxes' and 'scores' must have the same length.")
+
+    for score in scores:
+        _validate_finite_numeric(score, "Score value")
+
+
+def validate_record(record: dict[str, Any], require_scores: bool = False) -> None:
+    """Validate a prediction or ground-truth record.
+
+    Args:
+        record: Input record.
+        require_scores: Whether the record must include scores.
+
+    Raises:
+        ValueError: If the record has an invalid structure.
+    """
+    boxes, _ = _validate_boxes_and_labels(record)
+    _validate_scores(record, boxes, require_scores=require_scores)
 
 
 def build_gt_index(ground_truth: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

@@ -1,90 +1,41 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
+import torch
 
-from detgpt.metrics import evaluate_dataset
+from detgpt.model import Model
 
 
-def load_json(path: str | Path) -> list[dict[str, Any]]:
-    """Load a JSON file containing a list of records.
+def train(epochs: int = 1, learning_rate: float = 1e-2) -> Model:
+    """Run a minimal training scaffold.
+
+    This entrypoint keeps ``train.py`` focused on training and can be replaced
+    with project-specific data loading and optimization code as experiments grow.
 
     Args:
-        path: Path to JSON file.
+        epochs: Number of synthetic training epochs.
+        learning_rate: Optimizer learning rate.
 
     Returns:
-        Parsed list of dictionaries.
+        Trained model instance.
     """
-    with Path(path).open("r", encoding="utf-8") as file:
-        data = json.load(file)
+    model = Model()
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    loss_fn = torch.nn.MSELoss()
 
-    if not isinstance(data, list):
-        raise ValueError("JSON file must contain a list of records.")
+    model.train()
+    for _ in range(epochs):
+        inputs = torch.rand(64, 1)
+        targets = 2.0 * inputs + 1.0
 
-    return data
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = loss_fn(outputs, targets)
+        loss.backward()
+        optimizer.step()
 
-
-def save_json(data: dict[str, Any], path: str | Path) -> None:
-    """Save a dictionary to JSON.
-
-    Args:
-        data: Dictionary to save.
-        path: Output path.
-    """
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
-
-
-def run_file_evaluation(
-    predictions_path: str | Path,
-    ground_truth_path: str | Path,
-    output_path: str | Path | None = None,
-) -> dict[str, dict[str, float | int]]:
-    """Run evaluation from JSON files.
-
-    Args:
-        predictions_path: Path to predictions JSON.
-        ground_truth_path: Path to ground-truth JSON.
-        output_path: Optional output JSON path for results.
-
-    Returns:
-        Evaluation results.
-    """
-    predictions = load_json(predictions_path)
-    ground_truth = load_json(ground_truth_path)
-
-    results = evaluate_dataset(predictions, ground_truth)
-
-    if output_path is not None:
-        save_json(results, output_path)
-
-    return results
+    return model
 
 
 if __name__ == "__main__":
-    mock_predictions = [
-        {
-            "image_path": "data/test.jpg",
-            "boxes": [
-                [167.46252250671387, 93.3789291381836, 49.3980598449707, 3.2646026611328125],
-            ],
-            "scores": [0.8027151226997375],
-            "labels": ["car"],
-        }
-    ]
-
-    mock_ground_truth = [
-        {
-            "image_path": "data/test.jpg",
-            "boxes": [
-                [165.0, 95.0, 50.0, 10.0],
-            ],
-            "labels": ["car"],
-        }
-    ]
-
-    results = evaluate_dataset(mock_predictions, mock_ground_truth)
-    print(results)
+    trained_model = train()
+    print(f"Training completed. Sample weight: {trained_model.layer.weight.item():.4f}")
