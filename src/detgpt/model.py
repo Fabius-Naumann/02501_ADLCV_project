@@ -7,6 +7,8 @@ from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
 
+from detgpt.box_utils import xyxy_to_cxcywh
+
 
 class Model(nn.Module):
     """Just a dummy model to show how to structure your code"""
@@ -176,15 +178,6 @@ class QwenVLMHandler:
         )[0]
         return generated_text.strip()
 
-    @staticmethod
-    def _xyxy_to_cxcywh(x1: float, y1: float, x2: float, y2: float) -> list[float]:
-        """Convert corner-format box to center-format box."""
-        width = x2 - x1
-        height = y2 - y1
-        center_x = x1 + width / 2
-        center_y = y1 + height / 2
-        return [center_x, center_y, width, height]
-
     def predict(
         self,
         image_tensor: Tensor,
@@ -260,7 +253,7 @@ class QwenVLMHandler:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                all_boxes.append(self._xyxy_to_cxcywh(x1, y1, x2, y2))
+                all_boxes.append(xyxy_to_cxcywh([x1, y1, x2, y2]))
                 all_scores.append(score_value)
                 all_labels.append(category_name)
 

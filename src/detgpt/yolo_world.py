@@ -5,14 +5,7 @@ from pathlib import Path
 
 from ultralytics import YOLOWorld
 
-
-def xyxy_to_cxcywh(box: list[float]) -> list[float]:
-    x1, y1, x2, y2 = box
-    w = x2 - x1
-    h = y2 - y1
-    cx = x1 + w / 2
-    cy = y1 + h / 2
-    return [cx, cy, w, h]
+from detgpt.box_utils import xyxy_to_cxcywh
 
 
 def predict_image(model: YOLOWorld, image_path: Path, class_names: list[str]) -> dict:
