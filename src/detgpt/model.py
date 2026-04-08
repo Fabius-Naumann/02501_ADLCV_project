@@ -69,6 +69,16 @@ class QwenVLMHandler:
     """Wrapper for prompt-based object localization with Qwen VLMs."""
 
     _REFERENCE_COORD_MAX = 1000.0
+    _SYSTEM_PROMPT = (
+        "You are a helpful assistant to detect objects in images. "
+        "When asked to detect elements based on a description, return ONLY valid JSON. "
+        'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
+        '"score": 0.0}]. '
+        "Coordinates must be integers scaled to a fixed 1000x1000 reference frame, where each value is in [0, 1000]. "
+        "Do not output absolute image pixel coordinates. Enforce xmin < xmax and ymin < ymax. "
+        "If no object is present, return []. "
+        "Do not include markdown, comments, or any extra text."
+    )
 
     def __init__(self, model_id: str = "Qwen/Qwen2-VL-2B-Instruct") -> None:
         """Initialize model and processor.
@@ -109,37 +119,70 @@ class QwenVLMHandler:
 
         self.model.eval()
 
-    def _build_prompt(self, category_name: str, image_width: int, image_height: int, max_detections: int) -> str:
-        """Build a strict structured prompt for one category."""
+    def _build_prompt(self, category_name: str, max_detections: int) -> str:
+        """Build a per-request user prompt for one category."""
         return (
-            "You are a helpful object detector assistant. "
-            f"Find objects of class '{category_name}' in this image. "
-            f"Image width is {image_width} pixels and height is {image_height} pixels. "
-            f'Return ONLY valid JSON with this schema: {{"detections": [{{"bbox_xyxy": [x1, y1, x2, y2], '
-            '"score": 0.0}}]}}. '
-            f"Use integer coordinates in a fixed {{{self._REFERENCE_COORD_MAX}x{self._REFERENCE_COORD_MAX}}} reference "
-            f"frame where x and y are in [0, {self._REFERENCE_COORD_MAX}]. "
-            "Do not output absolute image pixel coordinates. "
-            "Enforce x1 < x2 and y1 < y2. "
+            f"Detect objects of class '{category_name}' in this image. "
+            f"Set each detection 'label' field to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
-            'If no object is present, return {"detections": []}.'
+            "Prefer high precision over high recall."
         )
 
     @staticmethod
-    def _extract_json_blob(generated_text: str) -> dict[str, list[dict[str, list[float] | float]]] | None:
-        """Extract first JSON object from model output."""
-        match = re.search(r"\{.*\}", generated_text, re.DOTALL)
-        if match is None:
-            return None
+    def _extract_json_blob(generated_text: str) -> Any | None:
+        """Extract first JSON value (object or array) from model output."""
+        decoder = json.JSONDecoder()
+        for start_index, char in enumerate(generated_text):
+            if char not in "[{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(generated_text[start_index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        return None
 
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
+    @staticmethod
+    def _normalize_json_detections(parsed_json: Any) -> list[dict[str, list[float] | float | str]]:
+        """Normalize JSON detections into a unified detection dictionary format."""
+        raw_detections: list[Any]
+        if isinstance(parsed_json, dict):
+            detections_value = parsed_json.get("detections", [])
+            raw_detections = detections_value if isinstance(detections_value, list) else []
+        elif isinstance(parsed_json, list):
+            raw_detections = parsed_json
+        else:
+            raw_detections = []
 
-        if not isinstance(parsed, dict):
-            return None
-        return parsed
+        normalized: list[dict[str, list[float] | float | str]] = []
+        for detection in raw_detections:
+            if isinstance(detection, dict):
+                box_value = detection.get("bbox_2d", detection.get("bbox_xyxy"))
+                label_value = detection.get("label", "")
+                score_value = detection.get("score", 1.0)
+            elif isinstance(detection, list) and len(detection) == 4:
+                box_value = detection
+                label_value = ""
+                score_value = 1.0
+            else:
+                continue
+
+            if isinstance(box_value, tuple):
+                box_value = list(box_value)
+            if not isinstance(box_value, list) or len(box_value) != 4:
+                continue
+
+            normalized.append(
+                {
+                    "bbox_2d": box_value,
+                    "bbox_xyxy": box_value,
+                    "label": str(label_value),
+                    "score": score_value,
+                }
+            )
+
+        return normalized
 
     @staticmethod
     def _extract_coordinate_pair_detections(generated_text: str) -> list[dict[str, list[float] | float]]:
@@ -162,13 +205,25 @@ class QwenVLMHandler:
     def _parse_generated_output(
         self,
         generated_text: str,
-    ) -> tuple[list[dict[str, list[float] | float]], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Parse generated text into detections with parser diagnostics."""
         json_blob = self._extract_json_blob(generated_text)
-        if json_blob is not None:
-            json_detections = json_blob.get("detections", [])
-            if isinstance(json_detections, list):
-                return json_detections, {"parser": "json", "parsed_output": json_blob}
+        if isinstance(json_blob, list):
+            json_detections = self._normalize_json_detections(json_blob)
+            if json_detections or len(json_blob) == 0:
+                return json_detections, {
+                    "parser": "json",
+                    "parsed_output": {"detections": json_detections},
+                }
+        elif isinstance(json_blob, dict):
+            detections_value = json_blob.get("detections")
+            if isinstance(detections_value, list):
+                json_detections = self._normalize_json_detections(json_blob)
+                if json_detections or len(detections_value) == 0:
+                    return json_detections, {
+                        "parser": "json",
+                        "parsed_output": {"detections": json_detections},
+                    }
 
         coord_detections = self._extract_coordinate_pair_detections(generated_text)
         if coord_detections:
@@ -188,12 +243,16 @@ class QwenVLMHandler:
         try:
             messages = [
                 {
+                    "role": "system",
+                    "content": self._SYSTEM_PROMPT,
+                },
+                {
                     "role": "user",
                     "content": [
                         {"type": "image", "image": image_pil},
                         {"type": "text", "text": prompt},
                     ],
-                }
+                },
             ]
             text_prompt = self.processor.apply_chat_template(
                 messages,
@@ -203,7 +262,8 @@ class QwenVLMHandler:
             inputs = self.processor(text=[text_prompt], images=[image_pil], return_tensors="pt")
             used_chat_template = True
         except (AttributeError, TypeError, ValueError):
-            inputs = self.processor(images=image_pil, text=prompt, return_tensors="pt")
+            fallback_prompt = f"{self._SYSTEM_PROMPT}\n\n{prompt}"
+            inputs = self.processor(images=image_pil, text=fallback_prompt, return_tensors="pt")
 
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         do_sample = temperature > 0
@@ -230,7 +290,7 @@ class QwenVLMHandler:
 
     def _extract_category_detections(
         self,
-        detections: list[dict[str, list[float] | float]],
+        detections: list[dict[str, Any]],
         category_name: str,
         image_width: int,
         image_height: int,
@@ -315,8 +375,6 @@ class QwenVLMHandler:
         for category_name in unique_category_names:
             prompt = self._build_prompt(
                 category_name=category_name,
-                image_width=image_width,
-                image_height=image_height,
                 max_detections=max_detections_per_category,
             )
             generated_text = self._generate_text(
