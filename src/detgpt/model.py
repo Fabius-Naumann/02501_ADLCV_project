@@ -68,6 +68,8 @@ class GroundingDINOHandler:
 class QwenVLMHandler:
     """Wrapper for prompt-based object localization with Qwen VLMs."""
 
+    _REFERENCE_COORD_MAX = 1000.0
+
     def __init__(self, model_id: str = "Qwen/Qwen2-VL-2B-Instruct") -> None:
         """Initialize model and processor.
 
@@ -95,6 +97,9 @@ class QwenVLMHandler:
                 "Qwen/Qwen2-VL-2B-Instruct",
                 "Qwen/Qwen2.5-VL-3B-Instruct",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
+                "Qwen/Qwen3.5-2B",
+                "Qwen/Qwen3.5-4B",
+                "Qwen/Qwen3.5-9B",
             ]
             raise OSError(
                 f"Failed to load model_id='{model_id}'. This usually means the repo id is invalid or private/gated. "
@@ -107,12 +112,15 @@ class QwenVLMHandler:
     def _build_prompt(self, category_name: str, image_width: int, image_height: int, max_detections: int) -> str:
         """Build a strict structured prompt for one category."""
         return (
-            "You are an object detector. "
+            "You are a helpful object detector assistant. "
             f"Find objects of class '{category_name}' in this image. "
             f"Image width is {image_width} pixels and height is {image_height} pixels. "
             f'Return ONLY valid JSON with this schema: {{"detections": [{{"bbox_xyxy": [x1, y1, x2, y2], '
             '"score": 0.0}}]}}. '
-            "Use integer pixel coordinates, enforce x1 < x2 and y1 < y2, and keep coordinates inside image bounds. "
+            f"Use integer coordinates in a fixed {{{self._REFERENCE_COORD_MAX}x{self._REFERENCE_COORD_MAX}}} reference "
+            f"frame where x and y are in [0, {self._REFERENCE_COORD_MAX}]. "
+            "Do not output absolute image pixel coordinates. "
+            "Enforce x1 < x2 and y1 < y2. "
             f"Return at most {max_detections} detection(s). "
             'If no object is present, return {"detections": []}.'
         )
@@ -228,10 +236,13 @@ class QwenVLMHandler:
         image_height: int,
         max_detections_per_category: int,
     ) -> tuple[list[list[float]], list[float], list[str]]:
-        """Extract sanitized detections for one category from parsed model output."""
+        """Extract sanitized detections and convert from 0-1000 reference coordinates to pixels."""
         boxes: list[list[float]] = []
         scores: list[float] = []
         labels: list[str] = []
+        reference_max = self._REFERENCE_COORD_MAX
+        width_scale = float(max(image_width - 1, 0)) / reference_max
+        height_scale = float(max(image_height - 1, 0)) / reference_max
 
         for detection in detections[:max_detections_per_category]:
             if not isinstance(detection, dict):
@@ -248,12 +259,17 @@ class QwenVLMHandler:
             except (TypeError, ValueError):
                 continue
 
-            x1 = min(max(x1, 0.0), float(image_width - 1))
-            y1 = min(max(y1, 0.0), float(image_height - 1))
-            x2 = min(max(x2, 0.0), float(image_width - 1))
-            y2 = min(max(y2, 0.0), float(image_height - 1))
+            x1 = min(max(x1, 0.0), reference_max)
+            y1 = min(max(y1, 0.0), reference_max)
+            x2 = min(max(x2, 0.0), reference_max)
+            y2 = min(max(y2, 0.0), reference_max)
             if x2 <= x1 or y2 <= y1:
                 continue
+
+            x1 = x1 * width_scale
+            y1 = y1 * height_scale
+            x2 = x2 * width_scale
+            y2 = y2 * height_scale
 
             boxes.append(xyxy_to_cxcywh([x1, y1, x2, y2]))
             scores.append(score_value)

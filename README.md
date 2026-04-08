@@ -1,5 +1,3 @@
-````markdown
-
 # DetGPT: In-Context Object Detection via Visual Example Prompting
 This project investigates In-Context Learning (ICL) for object detection using Vision-Language Models (VLMs) like Qwen2.5-VL and InternVL. We aim to improve few-shot detection performance by providing visual examples with bounding boxes rather than just text prompts.
 
@@ -69,5 +67,3 @@ The directory structure of the project looks like this:
 Created using [mlops_template](https://github.com/SkafteNicki/mlops_template),
 a [cookiecutter template](https://github.com/cookiecutter/cookiecutter) for getting
 started with Machine Learning Operations (MLOps).
-
-````

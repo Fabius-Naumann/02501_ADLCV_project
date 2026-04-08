@@ -19,7 +19,7 @@ from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.visualize import _save_or_show_figure
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
-QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 
 
 def save_prediction_results(
