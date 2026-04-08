@@ -49,7 +49,8 @@ def validate_record(record: dict[str, Any], require_scores: bool = False) -> Non
         if not isinstance(box, list) or len(box) != 4:
             raise ValueError("Each box must be a list of four numbers in cxcywh format.")
 
-    if require_scores:
+    should_validate_scores = require_scores or "scores" in record
+    if should_validate_scores:
         if "scores" not in record:
             raise ValueError("Prediction record must include 'scores'.")
         scores = record["scores"]
@@ -96,11 +97,11 @@ def evaluate_image(
     Returns:
         Dictionary with tp, fp, and fn.
     """
-    validate_record(pred, require_scores=False)
+    validate_record(pred, require_scores=("scores" in pred))
     validate_record(gt, require_scores=False)
 
     scores = pred.get("scores", [1.0] * len(pred["boxes"]))
-    pred_items = list(zip(pred["boxes"], pred["labels"], scores, strict=False))
+    pred_items = list(zip(pred["boxes"], pred["labels"], scores, strict=True))
     pred_items.sort(key=lambda item: item[2], reverse=True)
 
     matched_gt_indices: set[int] = set()
@@ -110,7 +111,7 @@ def evaluate_image(
     for pred_box, pred_label, _ in pred_items:
         found_match = False
 
-        for gt_index, (gt_box, gt_label) in enumerate(zip(gt["boxes"], gt["labels"], strict=False)):
+        for gt_index, (gt_box, gt_label) in enumerate(zip(gt["boxes"], gt["labels"], strict=True)):
             if gt_index in matched_gt_indices:
                 continue
 
@@ -155,7 +156,7 @@ def evaluate_dataset_at_threshold(
     seen_image_paths: set[str] = set()
 
     for pred in predictions:
-        validate_record(pred, require_scores=False)
+        validate_record(pred, require_scores=("scores" in pred))
 
         image_path = pred.get("image_path")
         if image_path is None:

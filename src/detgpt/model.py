@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from typing import Any
 
 import torch
 from PIL import Image
@@ -132,6 +133,47 @@ class QwenVLMHandler:
             return None
         return parsed
 
+    @staticmethod
+    def _extract_coordinate_pair_detections(generated_text: str) -> list[dict[str, list[float] | float]]:
+        """Extract detections from text like ``label(x1,y1),(x2,y2)``."""
+        pattern = re.compile(
+            r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*,\s*"
+            r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)"
+        )
+        matches = pattern.findall(generated_text)
+        detections: list[dict[str, list[float] | float]] = []
+        for x1, y1, x2, y2 in matches:
+            detections.append(
+                {
+                    "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+                    "score": 1.0,
+                }
+            )
+        return detections
+
+    def _parse_generated_output(
+        self,
+        generated_text: str,
+    ) -> tuple[list[dict[str, list[float] | float]], dict[str, Any]]:
+        """Parse generated text into detections with parser diagnostics."""
+        json_blob = self._extract_json_blob(generated_text)
+        if json_blob is not None:
+            json_detections = json_blob.get("detections", [])
+            if isinstance(json_detections, list):
+                return json_detections, {"parser": "json", "parsed_output": json_blob}
+
+        coord_detections = self._extract_coordinate_pair_detections(generated_text)
+        if coord_detections:
+            return coord_detections, {
+                "parser": "coordinate_pairs",
+                "parsed_output": {"detections": coord_detections},
+            }
+
+        return [], {
+            "parser": "none",
+            "parsed_output": {"detections": []},
+        }
+
     def _generate_text(self, image_pil: Image.Image, prompt: str, max_new_tokens: int, temperature: float) -> str:
         """Run one image-text generation step with chat-template fallback."""
         used_chat_template = False
@@ -180,17 +222,13 @@ class QwenVLMHandler:
 
     def _extract_category_detections(
         self,
-        parsed: dict[str, list[dict[str, list[float] | float]]],
+        detections: list[dict[str, list[float] | float]],
         category_name: str,
         image_width: int,
         image_height: int,
         max_detections_per_category: int,
     ) -> tuple[list[list[float]], list[float], list[str]]:
         """Extract sanitized detections for one category from parsed model output."""
-        detections = parsed.get("detections", [])
-        if not isinstance(detections, list):
-            return [], [], []
-
         boxes: list[list[float]] = []
         scores: list[float] = []
         labels: list[str] = []
@@ -230,8 +268,8 @@ class QwenVLMHandler:
         max_detections_per_category: int = 1,
         max_new_tokens: int = 256,
         temperature: float = 0.0,
-        return_raw_text_outputs: bool = False,
-    ) -> dict[str, Tensor | list[str] | dict[str, str]]:
+        return_debug_outputs: bool = False,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Run prompt-based localization for a list of categories.
 
         Args:
@@ -240,11 +278,11 @@ class QwenVLMHandler:
             max_detections_per_category: Maximum detections returned per category.
             max_new_tokens: Generation length limit.
             temperature: Decoding temperature.
-            return_raw_text_outputs: Include raw generated text per category in output.
+            return_debug_outputs: Include per-category input/raw/parsed/final debug payload.
 
         Returns:
             Dictionary with keys: boxes (cxcywh), scores, labels.
-            If ``return_raw_text_outputs=True``, includes ``raw_text_outputs``.
+            If ``return_debug_outputs=True``, includes ``debug_entries``.
         """
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
@@ -256,7 +294,7 @@ class QwenVLMHandler:
         all_boxes: list[list[float]] = []
         all_scores: list[float] = []
         all_labels: list[str] = []
-        raw_text_outputs: dict[str, str] = {}
+        debug_entries: list[dict[str, Any]] = []
 
         for category_name in unique_category_names:
             prompt = self._build_prompt(
@@ -271,20 +309,31 @@ class QwenVLMHandler:
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
             )
-            if return_raw_text_outputs:
-                raw_text_outputs[category_name] = generated_text
-
-            parsed = self._extract_json_blob(generated_text)
-            if parsed is None:
-                continue
+            parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
 
             category_boxes, category_scores, category_labels = self._extract_category_detections(
-                parsed=parsed,
+                detections=parsed_detections,
                 category_name=category_name,
                 image_width=image_width,
                 image_height=image_height,
                 max_detections_per_category=max_detections_per_category,
             )
+
+            if return_debug_outputs:
+                debug_entries.append(
+                    {
+                        "category_name": category_name,
+                        "input_prompt": prompt,
+                        "raw_output_text": generated_text,
+                        "parsed_output": parse_metadata,
+                        "final_output": {
+                            "boxes_cxcywh": category_boxes,
+                            "scores": category_scores,
+                            "labels": category_labels,
+                        },
+                    }
+                )
+
             all_boxes.extend(category_boxes)
             all_scores.extend(category_scores)
             all_labels.extend(category_labels)
@@ -296,13 +345,13 @@ class QwenVLMHandler:
             boxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
             scores_tensor = torch.zeros((0,), dtype=torch.float32)
 
-        outputs: dict[str, Tensor | list[str] | dict[str, str]] = {
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
             "boxes": boxes_tensor,
             "scores": scores_tensor,
             "labels": all_labels,
         }
-        if return_raw_text_outputs:
-            outputs["raw_text_outputs"] = raw_text_outputs
+        if return_debug_outputs:
+            outputs["debug_entries"] = debug_entries
 
         return outputs
 

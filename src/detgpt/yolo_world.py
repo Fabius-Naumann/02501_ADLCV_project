@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ultralytics import YOLOWorld
 
+from detgpt import OUTPUTS_DIR
 from detgpt.box_utils import xyxy_to_cxcywh
 
 
@@ -39,7 +40,7 @@ def run_yolo_world_on_folder(image_dir: str | Path, class_names: list[str]) -> l
     model = YOLOWorld("yolov8s-world.pt")
     model.set_classes(class_names)
 
-    output_dir = Path("outputs")
+    output_dir = OUTPUTS_DIR
     predictions_dir = output_dir / "predictions"
     predictions_dir.mkdir(parents=True, exist_ok=True)
 
