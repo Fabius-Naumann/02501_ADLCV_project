@@ -98,7 +98,8 @@ def _predict_with_backend(
     query_categories: list[str],
     qwen_max_detections_per_category: int,
     qwen_temperature: float,
-) -> dict[str, Tensor | list[str]]:
+    qwen_return_raw_text_outputs: bool,
+) -> dict[str, Tensor | list[str] | dict[str, str]]:
     """Run backend-specific prediction logic."""
     if normalized_backend == "qwen_vlm":
         return detector.predict(
@@ -106,6 +107,7 @@ def _predict_with_backend(
             query_categories,
             max_detections_per_category=qwen_max_detections_per_category,
             temperature=qwen_temperature,
+            return_raw_text_outputs=qwen_return_raw_text_outputs,
         )
 
     return detector.predict(image, query_categories)
@@ -117,6 +119,20 @@ def _boxes_for_visualization(normalized_backend: str, boxes: Tensor) -> Tensor:
         return boxes
 
     return cxcywh_tensor_to_xyxy(boxes)
+
+
+def _log_qwen_raw_outputs(
+    img_id: int,
+    detections: dict[str, Tensor | list[str] | dict[str, str]],
+) -> None:
+    """Log raw text outputs captured from qwen_vlm for debugging."""
+    raw_text_outputs = detections.get("raw_text_outputs", {})
+    if not isinstance(raw_text_outputs, dict) or not raw_text_outputs:
+        logger.warning(f"Image {img_id}: no raw qwen text outputs were captured.")
+        return
+
+    for category_name, raw_text in raw_text_outputs.items():
+        logger.info(f"Image {img_id} | Category '{category_name}' | Raw Qwen output:\n{raw_text}")
 
 
 def run_task1_baseline(
@@ -138,6 +154,10 @@ def run_task1_baseline(
     qwen_temperature: float = typer.Option(
         0.0,
         help="Decoding temperature for qwen_vlm. Use 0.0 for deterministic output.",
+    ),
+    qwen_log_raw_text: bool = typer.Option(
+        False,
+        help="Log raw generated text per category for qwen_vlm debugging.",
     ),
 ) -> None:
     """
@@ -183,7 +203,11 @@ def run_task1_baseline(
             query_categories=query_categories,
             qwen_max_detections_per_category=qwen_max_detections_per_category,
             qwen_temperature=qwen_temperature,
+            qwen_return_raw_text_outputs=qwen_log_raw_text,
         )
+
+        if normalized_backend == "qwen_vlm" and qwen_log_raw_text:
+            _log_qwen_raw_outputs(img_id=img_id, detections=detections)
 
         # 4. Optional Visualization
         if save_viz:

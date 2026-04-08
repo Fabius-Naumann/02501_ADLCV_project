@@ -178,6 +178,51 @@ class QwenVLMHandler:
         )[0]
         return generated_text.strip()
 
+    def _extract_category_detections(
+        self,
+        parsed: dict[str, list[dict[str, list[float] | float]]],
+        category_name: str,
+        image_width: int,
+        image_height: int,
+        max_detections_per_category: int,
+    ) -> tuple[list[list[float]], list[float], list[str]]:
+        """Extract sanitized detections for one category from parsed model output."""
+        detections = parsed.get("detections", [])
+        if not isinstance(detections, list):
+            return [], [], []
+
+        boxes: list[list[float]] = []
+        scores: list[float] = []
+        labels: list[str] = []
+
+        for detection in detections[:max_detections_per_category]:
+            if not isinstance(detection, dict):
+                continue
+
+            box = detection.get("bbox_xyxy")
+            score = detection.get("score", 0.0)
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+
+            try:
+                x1, y1, x2, y2 = [float(value) for value in box]
+                score_value = float(score)
+            except (TypeError, ValueError):
+                continue
+
+            x1 = min(max(x1, 0.0), float(image_width - 1))
+            y1 = min(max(y1, 0.0), float(image_height - 1))
+            x2 = min(max(x2, 0.0), float(image_width - 1))
+            y2 = min(max(y2, 0.0), float(image_height - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            boxes.append(xyxy_to_cxcywh([x1, y1, x2, y2]))
+            scores.append(score_value)
+            labels.append(category_name)
+
+        return boxes, scores, labels
+
     def predict(
         self,
         image_tensor: Tensor,
@@ -185,7 +230,8 @@ class QwenVLMHandler:
         max_detections_per_category: int = 1,
         max_new_tokens: int = 256,
         temperature: float = 0.0,
-    ) -> dict[str, Tensor | list[str]]:
+        return_raw_text_outputs: bool = False,
+    ) -> dict[str, Tensor | list[str] | dict[str, str]]:
         """Run prompt-based localization for a list of categories.
 
         Args:
@@ -194,9 +240,11 @@ class QwenVLMHandler:
             max_detections_per_category: Maximum detections returned per category.
             max_new_tokens: Generation length limit.
             temperature: Decoding temperature.
+            return_raw_text_outputs: Include raw generated text per category in output.
 
         Returns:
             Dictionary with keys: boxes (cxcywh), scores, labels.
+            If ``return_raw_text_outputs=True``, includes ``raw_text_outputs``.
         """
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
@@ -208,6 +256,7 @@ class QwenVLMHandler:
         all_boxes: list[list[float]] = []
         all_scores: list[float] = []
         all_labels: list[str] = []
+        raw_text_outputs: dict[str, str] = {}
 
         for category_name in unique_category_names:
             prompt = self._build_prompt(
@@ -222,40 +271,23 @@ class QwenVLMHandler:
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
             )
+            if return_raw_text_outputs:
+                raw_text_outputs[category_name] = generated_text
 
             parsed = self._extract_json_blob(generated_text)
             if parsed is None:
                 continue
 
-            detections = parsed.get("detections", [])
-            if not isinstance(detections, list):
-                continue
-
-            for detection in detections[:max_detections_per_category]:
-                if not isinstance(detection, dict):
-                    continue
-
-                box = detection.get("bbox_xyxy")
-                score = detection.get("score", 0.0)
-                if not isinstance(box, list) or len(box) != 4:
-                    continue
-
-                try:
-                    x1, y1, x2, y2 = [float(value) for value in box]
-                    score_value = float(score)
-                except (TypeError, ValueError):
-                    continue
-
-                x1 = min(max(x1, 0.0), float(image_width - 1))
-                y1 = min(max(y1, 0.0), float(image_height - 1))
-                x2 = min(max(x2, 0.0), float(image_width - 1))
-                y2 = min(max(y2, 0.0), float(image_height - 1))
-                if x2 <= x1 or y2 <= y1:
-                    continue
-
-                all_boxes.append(xyxy_to_cxcywh([x1, y1, x2, y2]))
-                all_scores.append(score_value)
-                all_labels.append(category_name)
+            category_boxes, category_scores, category_labels = self._extract_category_detections(
+                parsed=parsed,
+                category_name=category_name,
+                image_width=image_width,
+                image_height=image_height,
+                max_detections_per_category=max_detections_per_category,
+            )
+            all_boxes.extend(category_boxes)
+            all_scores.extend(category_scores)
+            all_labels.extend(category_labels)
 
         if all_boxes:
             boxes_tensor = torch.tensor(all_boxes, dtype=torch.float32)
@@ -264,11 +296,15 @@ class QwenVLMHandler:
             boxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
             scores_tensor = torch.zeros((0,), dtype=torch.float32)
 
-        return {
+        outputs: dict[str, Tensor | list[str] | dict[str, str]] = {
             "boxes": boxes_tensor,
             "scores": scores_tensor,
             "labels": all_labels,
         }
+        if return_raw_text_outputs:
+            outputs["raw_text_outputs"] = raw_text_outputs
+
+        return outputs
 
 
 if __name__ == "__main__":
