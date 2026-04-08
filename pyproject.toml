@@ -28,6 +28,7 @@ dependencies = [
     "torchvision>=0.25.0",
     "transformers>=5.4.0",
     "typer>=0.15.1",
+    "ultralytics>=8.4.27",
     "uvicorn>=0.42.0",
 ]
 

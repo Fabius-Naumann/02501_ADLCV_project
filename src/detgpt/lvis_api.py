@@ -13,6 +13,7 @@ from loguru import logger
 from lvis import LVIS
 
 from detgpt import PROCESSED_DIR, RAW_DIR, init_data_dirs
+from detgpt.box_utils import xywh_to_cxcywh_dict
 
 init_data_dirs()
 
@@ -195,29 +196,6 @@ class LvisAPI(LVIS):
             return Path(parsed_path.parts[-2]) / parsed_path.name
         return Path(parsed_path.name)
 
-    @staticmethod
-    def _bbox_xcycwh(
-        bbox_xywh: list[float],
-    ) -> dict[str, float]:
-        """Convert LVIS/COCO ``[x, y, width, height]`` to center-format bbox.
-
-        Args:
-            bbox_xywh: LVIS/COCO bbox in absolute pixel coordinates.
-
-        Returns:
-            Center-format bbox dictionary with keys ``x_center``, ``y_center``, ``width`` and ``height``.
-        """
-        x_min, y_min, box_width, box_height = bbox_xywh
-        x_center = x_min + box_width / 2.0
-        y_center = y_min + box_height / 2.0
-
-        return {
-            "x_center": x_center,
-            "y_center": y_center,
-            "width": box_width,
-            "height": box_height,
-        }
-
     def _build_annotations_for_image(
         self,
         image: dict[str, Any],
@@ -245,7 +223,7 @@ class LvisAPI(LVIS):
             if len(bbox_xywh) != 4:
                 continue
 
-            bbox_xywh_centered = self._bbox_xcycwh(bbox_xywh)
+            bbox_xywh_centered = xywh_to_cxcywh_dict(bbox_xywh)
 
             records.append(
                 {
