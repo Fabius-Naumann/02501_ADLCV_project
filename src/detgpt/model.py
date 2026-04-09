@@ -3,10 +3,17 @@ import os
 import re
 from typing import Any
 
+import numpy as np
 import torch
 from PIL import Image
 from torch import Tensor, nn
-from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
+from transformers import (
+    AutoModel,
+    AutoModelForImageTextToText,
+    AutoModelForZeroShotObjectDetection,
+    AutoProcessor,
+    AutoTokenizer,
+)
 
 from detgpt.box_utils import xyxy_to_cxcywh
 
@@ -429,6 +436,192 @@ class QwenVLMHandler:
 
         return outputs
 
+
+class InternVLHandler(QwenVLMHandler):
+    """Wrapper for InternVL prompt-based object localization."""
+
+    _REFERENCE_COORD_MAX = 1000.0
+    _IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    _IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    _SYSTEM_PROMPT = (
+        "You are a helpful assistant to detect objects in images. "
+        "When asked to detect elements based on a description, return ONLY valid JSON. "
+        'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
+        '"score": 0.0}]. '
+        "Coordinates must be integers scaled to a fixed 1000x1000 reference frame, where each value is in [0, 1000]. "
+        "Do not output absolute image pixel coordinates. Enforce xmin < xmax and ymin < ymax. "
+        "If no object is present, return []. "
+        "Do not include markdown, comments, or any extra text."
+    )
+
+    def __init__(self, model_id: str = "OpenGVLab/InternVL2_5-8B") -> None:
+        """Initialize model and processor."""
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = AutoModel.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_flash_attn=True,
+            trust_remote_code=True).to(self.device)
+        self.model.eval()
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+
+    def __find_closest_aspect_ratio(self, aspect_ratio, target_ratios, width, height, image_size):
+        best_ratio_diff = float('inf')
+        best_ratio = (1, 1)
+        area = width * height
+        for ratio in target_ratios:
+            target_aspect_ratio = ratio[0] / ratio[1]
+            ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+            if ratio_diff < best_ratio_diff:
+                best_ratio_diff = ratio_diff
+                best_ratio = ratio
+            elif ratio_diff == best_ratio_diff:
+                if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                    best_ratio = ratio
+        return best_ratio
+
+    def __dynamic_preprocess(self, image: Image.Image, min_num=1, max_num=12, image_size=448, use_thumbnail=False):
+        orig_width, orig_height = image.size
+        aspect_ratio = orig_width / orig_height
+
+        # calculate the existing image aspect ratio
+        target_ratios = {
+            (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+            i * j <= max_num and i * j >= min_num}
+        target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+        # find the closest aspect ratio to the target
+        target_aspect_ratio = self.__find_closest_aspect_ratio(
+            aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+
+        # calculate the target width and height
+        target_width = image_size * target_aspect_ratio[0]
+        target_height = image_size * target_aspect_ratio[1]
+        blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+        # resize the image
+        resized_img = image.resize((target_width, target_height))
+        processed_images = []
+        for i in range(blocks):
+            box = (
+                (i % (target_width // image_size)) * image_size,
+                (i // (target_width // image_size)) * image_size,
+                ((i % (target_width // image_size)) + 1) * image_size,
+                ((i // (target_width // image_size)) + 1) * image_size
+            )
+            # split the image
+            split_img = resized_img.crop(box)
+            processed_images.append(split_img)
+        assert len(processed_images) == blocks
+        if use_thumbnail and len(processed_images) != 1:
+            thumbnail_img = image.resize((image_size, image_size))
+            processed_images.append(thumbnail_img)
+        return processed_images
+
+    def _load_and_preprocess_image(self, image_pil: Image.Image) -> Tensor:
+        """Preprocess a PIL image into tile tensors expected by InternVL."""
+        images = self.__dynamic_preprocess(
+            image_pil,
+            image_size=448,
+            use_thumbnail=True,
+            max_num=12,
+        )
+        mean = torch.tensor(self._IMAGENET_MEAN, dtype=torch.float32).view(3, 1, 1)
+        std = torch.tensor(self._IMAGENET_STD, dtype=torch.float32).view(3, 1, 1)
+
+        pixel_values: list[Tensor] = []
+        for image in images:
+            tensor_image = torch.from_numpy(np.array(image, dtype=np.float32)).permute(2, 0, 1) / 255.0
+            tensor_image = (tensor_image - mean) / std
+            pixel_values.append(tensor_image)
+
+        return torch.stack(pixel_values).to(dtype=torch.bfloat16, device=self.device)
+
+    def predict(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        max_detections_per_category: int = 1,
+        max_new_tokens: int = 256,
+        return_debug_outputs: bool = False,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
+        """Run inference on a single image tensor."""
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+        image_width, image_height = image_pil.size
+
+        preprocessed_images = self._load_and_preprocess_image(image_pil)
+        generation_config = {"max_new_tokens": max_new_tokens, "do_sample": True}
+        num_patches_list = [preprocessed_images.shape[0]]
+
+        cleaned_names = [name.strip() for name in category_names if name.strip()]
+        unique_category_names = list(dict.fromkeys(cleaned_names))
+
+        all_boxes: list[list[float]] = []
+        all_scores: list[float] = []
+        all_labels: list[str] = []
+        debug_entries: list[dict[str, Any]] = []
+
+        for category_name in unique_category_names:
+            prompt = self._build_prompt(
+                category_name=category_name,
+                max_detections=max_detections_per_category,
+            )
+
+            prompt = "<image>\n" + self._SYSTEM_PROMPT + "\n\n" + prompt
+
+            response, _ = self.model.chat(self.tokenizer, preprocessed_images, prompt, generation_config,
+                               num_patches_list=num_patches_list,
+                               history=None, return_history=True)
+
+            parsed_detections, parse_metadata = self._parse_generated_output(response)
+
+            category_boxes, category_scores, category_labels = self._extract_category_detections(
+                detections=parsed_detections,
+                category_name=category_name,
+                image_width=image_width,
+                image_height=image_height,
+                max_detections_per_category=max_detections_per_category,
+            )
+
+            if return_debug_outputs:
+                debug_entries.append(
+                    {
+                        "category_name": category_name,
+                        "input_prompt": prompt,
+                        "raw_output_text": response,
+                        "parsed_output": parse_metadata,
+                        "final_output": {
+                            "boxes_cxcywh": category_boxes,
+                            "scores": category_scores,
+                            "labels": category_labels,
+                        },
+                    }
+                )
+
+            all_boxes.extend(category_boxes)
+            all_scores.extend(category_scores)
+            all_labels.extend(category_labels)
+
+        if all_boxes:
+            boxes_tensor = torch.tensor(all_boxes, dtype=torch.float32)
+            scores_tensor = torch.tensor(all_scores, dtype=torch.float32)
+        else:
+            boxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
+            scores_tensor = torch.zeros((0,), dtype=torch.float32)
+
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
+            "boxes": boxes_tensor,
+            "scores": scores_tensor,
+            "labels": all_labels,
+        }
+        if return_debug_outputs:
+            outputs["debug_entries"] = debug_entries
+
+        return outputs
 
 if __name__ == "__main__":
     model = Model()
