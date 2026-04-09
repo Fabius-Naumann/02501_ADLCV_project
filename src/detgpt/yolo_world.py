@@ -1,64 +1,64 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
+import torch
+from torch import Tensor
 from ultralytics import YOLOWorld
 
-from detgpt import OUTPUTS_DIR
-from detgpt.box_utils import xyxy_to_cxcywh
 
+class YOLOWorldHandler:
+    def __init__(
+        self,
+        model_id: str = "yolov8s-world.pt",
+        imgsz: int = 640,
+        conf: float = 0.05,
+        device: str = "cpu",
+    ) -> None:
+        self.model = YOLOWorld(model_id)
+        self.imgsz = imgsz
+        self.conf = conf
+        self.device = device
 
-def predict_image(model: YOLOWorld, image_path: Path, class_names: list[str]) -> dict:
-    results = model.predict(
-        source=str(image_path),
-        imgsz=640,
-        conf=0.05,
-        verbose=False,
-    )
+        # Force the whole YOLO-World pipeline onto CPU to avoid the
+        # CLIP text-encoder device mismatch in set_classes(...)
+        self.model.to(self.device)
 
-    result = results[0]
-    boxes_xyxy = result.boxes.xyxy.cpu().tolist()
-    scores = result.boxes.conf.cpu().tolist()
-    label_ids = [int(x) for x in result.boxes.cls.cpu().tolist()]
+    def predict(self, image: Tensor, query_categories: list[str]) -> dict[str, Tensor | list[str]]:
+        if not query_categories:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
 
-    boxes_cxcywh = [xyxy_to_cxcywh(box) for box in boxes_xyxy]
-    labels = [class_names[i] for i in label_ids]
+        self.model.set_classes(query_categories)
 
-    return {
-        "image_path": str(image_path),
-        "boxes": boxes_cxcywh,
-        "scores": scores,
-        "labels": labels,
-    }
+        # Ultralytics expects HWC numpy input
+        image_np = image.permute(1, 2, 0).mul(255).clamp(0, 255).byte().cpu().numpy()
 
+        results = self.model.predict(
+            source=image_np,
+            imgsz=self.imgsz,
+            conf=self.conf,
+            verbose=False,
+            device=self.device,
+        )
 
-def run_yolo_world_on_folder(image_dir: str | Path, class_names: list[str]) -> list[dict]:
-    image_dir = Path(image_dir)
-    image_paths = sorted(list(image_dir.glob("*.jpg")) + list(image_dir.glob("*.png")))
+        result = results[0]
 
-    model = YOLOWorld("yolov8s-world.pt")
-    model.set_classes(class_names)
+        if result.boxes is None or len(result.boxes) == 0:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
 
-    output_dir = OUTPUTS_DIR
-    predictions_dir = output_dir / "predictions"
-    predictions_dir.mkdir(parents=True, exist_ok=True)
+        boxes = result.boxes.xyxy.detach().cpu().to(torch.float32)
+        scores = result.boxes.conf.detach().cpu().to(torch.float32)
+        class_indices = [int(x) for x in result.boxes.cls.detach().cpu().tolist()]
+        labels = [query_categories[i] for i in class_indices]
 
-    all_predictions = []
-
-    for image_path in image_paths:
-        prediction = predict_image(model, image_path, class_names)
-        all_predictions.append(prediction)
-
-    with (predictions_dir / "yolo_world_predictions.json").open("w", encoding="utf-8") as f:
-        json.dump(all_predictions, f, indent=2)
-
-    print(f"Saved predictions for {len(all_predictions)} images.")
-    return all_predictions
-
-
-if __name__ == "__main__":
-    run_yolo_world_on_folder(
-        image_dir="data",
-        class_names=["person", "car", "bicycle", "bus", "truck"],
-    )
+        return {
+            "boxes": boxes,
+            "scores": scores,
+            "labels": labels,
+        }

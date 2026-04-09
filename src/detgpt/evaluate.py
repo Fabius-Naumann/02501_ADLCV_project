@@ -17,9 +17,11 @@ from detgpt.box_utils import cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.visualize import _save_or_show_figure
+from detgpt.yolo_world import YOLOWorldHandler
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
+YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
 
 
 def save_prediction_results(
@@ -36,7 +38,6 @@ def save_prediction_results(
         output_path: Path to save the resulting .png.
     """
     fig, ax = plt.subplots(figsize=(10, 10))
-    # Convert tensor to [H, W, C] for matplotlib
     ax.imshow(image.permute(1, 2, 0).cpu().numpy())
 
     for box, label, score in zip(boxes, labels, scores, strict=False):
@@ -47,7 +48,6 @@ def save_prediction_results(
         rect = Rectangle((xmin, ymin), width, height, edgecolor="lime", facecolor="none", linewidth=2)
         ax.add_patch(rect)
 
-        # Add label with confidence score
         ax.text(
             xmin,
             ymin - 5,
@@ -65,7 +65,7 @@ def save_prediction_results(
 def _resolve_detector(
     detector_backend: str,
     model_id: str | None,
-) -> tuple[str, str, GroundingDINOHandler | QwenVLMHandler]:
+) -> tuple[str, str, GroundingDINOHandler | QwenVLMHandler | YOLOWorldHandler]:
     """Resolve backend name, model id, and detector instance."""
     normalized_backend = detector_backend.strip().lower()
 
@@ -77,7 +77,13 @@ def _resolve_detector(
         resolved_model_id = model_id or QWEN_DEFAULT_MODEL_ID
         return normalized_backend, resolved_model_id, QwenVLMHandler(model_id=resolved_model_id)
 
-    raise typer.BadParameter(f"Unsupported detector backend '{detector_backend}'. Use 'grounding_dino' or 'qwen_vlm'.")
+    if normalized_backend == "yolo_world":
+        resolved_model_id = model_id or YOLO_DEFAULT_MODEL_ID
+        return normalized_backend, resolved_model_id, YOLOWorldHandler(model_id=resolved_model_id)
+
+    raise typer.BadParameter(
+        f"Unsupported detector backend '{detector_backend}'. Use 'grounding_dino', 'qwen_vlm', or 'yolo_world'."
+    )
 
 
 def _extract_query_categories(category_names: list[str]) -> list[str]:
@@ -94,7 +100,7 @@ def _extract_query_categories(category_names: list[str]) -> list[str]:
 
 
 def _predict_with_backend(
-    detector: GroundingDINOHandler | QwenVLMHandler,
+    detector: GroundingDINOHandler | QwenVLMHandler | YOLOWorldHandler,
     normalized_backend: str,
     image: Tensor,
     query_categories: list[str],
@@ -246,7 +252,7 @@ def _write_qwen_debug_record(
 def _run_inference_loop(
     data_loader: DataLoader,
     dataset: Task1DetectionDataset,
-    detector: GroundingDINOHandler | QwenVLMHandler,
+    detector: GroundingDINOHandler | QwenVLMHandler | YOLOWorldHandler,
     normalized_backend: str,
     qwen_max_detections_per_category: int,
     qwen_temperature: float,
@@ -326,11 +332,11 @@ def run_task1_baseline(
     limit: int = typer.Option(20, help="Number of samples to evaluate for testing."),
     detector_backend: str = typer.Option(
         "grounding_dino",
-        help="Detector backend: grounding_dino or qwen_vlm.",
+        help="Detector backend: grounding_dino, qwen_vlm, or yolo_world.",
     ),
     model_id: str | None = typer.Option(
         None,
-        help="HF Model ID. If omitted, a backend-specific default is used.",
+        help="Model ID or checkpoint path. If omitted, a backend-specific default is used.",
     ),
     qwen_max_detections_per_category: int = typer.Option(
         1,
@@ -349,7 +355,6 @@ def run_task1_baseline(
     Evaluate selected detector backend on Task 1.
     Results are saved in a timestamped folder to prevent overwriting.
     """
-    # 1. Setup timestamped output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / "task1_results" / f"run_{timestamp}"
 
@@ -357,7 +362,6 @@ def run_task1_baseline(
         run_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created output directory: {run_dir}")
 
-    # 2. Initialize Data and Model
     normalized_split = split.strip().lower()
     if normalized_split not in {"val", "train"}:
         raise typer.BadParameter("Unsupported split. Use 'val' or 'train'.")
@@ -398,7 +402,6 @@ def run_task1_baseline(
             if debug_trace_path is not None:
                 logger.info(f"Qwen debug trace saved to {debug_trace_path}")
 
-    # 6. Finalize Results
     if save_results and summary_data:
         csv_path = run_dir / "detections_summary.csv"
         with csv_path.open("w", newline="") as f:
@@ -410,20 +413,3 @@ def run_task1_baseline(
 
 if __name__ == "__main__":
     typer.run(run_task1_baseline)
-
-    # predictions = [
-    #     {
-    #         "boxes": [[142, 92, 192, 95]],
-    #         "labels": ["car"],
-    #     }
-    # ]
-
-    # ground_truth = [
-    #     {
-    #         "boxes": [[140, 90, 190, 100]],
-    #         "labels": ["car"],
-    #     }
-    # ]
-
-    # results = evaluate_dataset(predictions, ground_truth)
-    # print(results)
