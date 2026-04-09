@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from detgpt import OUTPUTS_DIR
 from detgpt.box_utils import cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
+from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.visualize import _save_or_show_figure
 from detgpt.yolo_world import YOLOWorldHandler
@@ -25,7 +26,12 @@ YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
 
 
 def save_prediction_results(
-    image: Tensor, boxes: Tensor, labels: list[str], scores: Tensor, output_path: Path, title: str = "Model Predictions"
+    image: Tensor,
+    boxes: Tensor,
+    labels: list[str],
+    scores: Tensor,
+    output_path: Path,
+    title: str = "Model Predictions",
 ) -> None:
     """
     Renders and saves an image with predicted bounding boxes (xyxy format).
@@ -249,6 +255,71 @@ def _write_qwen_debug_record(
     debug_file_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _xyxy_tensor_to_cxcywh(boxes_xyxy: Tensor) -> Tensor:
+    """Convert Nx4 xyxy boxes to cxcywh."""
+    if boxes_xyxy.numel() == 0:
+        return torch.empty((0, 4), dtype=torch.float32)
+
+    x1 = boxes_xyxy[:, 0]
+    y1 = boxes_xyxy[:, 1]
+    x2 = boxes_xyxy[:, 2]
+    y2 = boxes_xyxy[:, 3]
+
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    w = x2 - x1
+    h = y2 - y1
+
+    return torch.stack([cx, cy, w, h], dim=1).to(torch.float32)
+
+
+def _prediction_boxes_for_metrics(normalized_backend: str, boxes: Tensor) -> Tensor:
+    """Return prediction boxes in cxcywh format for metrics."""
+    if normalized_backend == "qwen_vlm":
+        return boxes.to(torch.float32)
+
+    return _xyxy_tensor_to_cxcywh(boxes.to(torch.float32))
+
+
+def _build_prediction_record(
+    image_path: str,
+    normalized_backend: str,
+    detections: dict[str, Tensor | list[str] | list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build one prediction record for metrics.py."""
+    boxes_tensor = detections["boxes"]
+    scores_tensor = detections["scores"]
+    labels_any = detections["labels"]
+
+    assert isinstance(boxes_tensor, Tensor)
+    assert isinstance(scores_tensor, Tensor)
+    assert isinstance(labels_any, list)
+
+    boxes_cxcywh = _prediction_boxes_for_metrics(normalized_backend, boxes_tensor)
+
+    return {
+        "image_path": image_path,
+        "boxes": boxes_cxcywh.detach().cpu().tolist(),
+        "labels": [str(label) for label in labels_any],
+        "scores": scores_tensor.detach().cpu().tolist(),
+    }
+
+
+def _build_ground_truth_record(image_path: str, target: dict[str, Any]) -> dict[str, Any]:
+    """Build one ground-truth record for metrics.py."""
+    boxes_tensor = target["boxes"]
+    category_names = target["category_names"]
+
+    assert isinstance(boxes_tensor, Tensor)
+    assert isinstance(category_names, list)
+
+    return {
+        "image_path": image_path,
+        "boxes": boxes_tensor.detach().cpu().tolist(),
+        "labels": [str(label) for label in category_names],
+    }
+
+
 def _run_inference_loop(
     data_loader: DataLoader,
     dataset: Task1DetectionDataset,
@@ -262,9 +333,11 @@ def _run_inference_loop(
     save_results: bool,
     run_dir: Path,
     limit: int,
-) -> list[dict[str, Any]]:
-    """Run inference loop and return summary rows."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run inference loop and return summary rows, predictions, and ground truth."""
     summary_data: list[dict[str, Any]] = []
+    predictions: list[dict[str, Any]] = []
+    ground_truth: list[dict[str, Any]] = []
 
     for i, (images, targets) in enumerate(data_loader):
         if i >= limit:
@@ -273,8 +346,22 @@ def _run_inference_loop(
         image, target = images[0], targets[0]
         img_id = target["image_id"].item()
         query_categories = _extract_query_categories(target["category_names"])
+        image_file = _try_get_image_file(dataset=dataset, index=i)
+
+        if image_file is None:
+            continue
+
+        ground_truth.append(_build_ground_truth_record(image_file, target))
 
         if not query_categories:
+            predictions.append(
+                {
+                    "image_path": image_file,
+                    "boxes": [],
+                    "labels": [],
+                    "scores": [],
+                }
+            )
             continue
 
         detections = _predict_with_backend(
@@ -291,10 +378,12 @@ def _run_inference_loop(
             _write_qwen_debug_record(
                 debug_file_handle=debug_file_handle,
                 img_id=img_id,
-                image_file=_try_get_image_file(dataset=dataset, index=i),
+                image_file=image_file,
                 query_categories=query_categories,
                 detections=detections,
             )
+
+        predictions.append(_build_prediction_record(image_file, normalized_backend, detections))
 
         if save_viz:
             viz_dir = run_dir / "visualizations"
@@ -322,7 +411,7 @@ def _run_inference_loop(
                 }
             )
 
-    return summary_data
+    return summary_data, predictions, ground_truth
 
 
 def run_task1_baseline(
@@ -382,7 +471,7 @@ def run_task1_baseline(
     logger.info(f"Using split={normalized_split}, backend={normalized_backend}, model_id={resolved_model_id}")
 
     try:
-        summary_data = _run_inference_loop(
+        summary_data, predictions, ground_truth = _run_inference_loop(
             data_loader=data_loader,
             dataset=dataset,
             detector=detector,
@@ -409,6 +498,12 @@ def run_task1_baseline(
             writer.writeheader()
             writer.writerows(summary_data)
         logger.info(f"Summary saved to {csv_path}")
+
+    metrics = evaluate_dataset(predictions=predictions, ground_truth=ground_truth)
+    metrics_path = run_dir / "metrics.json"
+    with metrics_path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    logger.info(f"Metrics saved to {metrics_path}")
 
 
 if __name__ == "__main__":
