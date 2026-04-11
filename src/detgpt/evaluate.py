@@ -15,11 +15,12 @@ from torch.utils.data import DataLoader
 from detgpt import OUTPUTS_DIR
 from detgpt.box_utils import cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
-from detgpt.model import GroundingDINOHandler, QwenVLMHandler
+from detgpt.model import GroundingDINOHandler, InternVLHandler, QwenVLMHandler
 from detgpt.visualize import _save_or_show_figure
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
+INTERNVL_DEFAULT_MODEL_ID = "OpenGVLab/InternVL2_5-8B"
 
 
 def save_prediction_results(
@@ -65,7 +66,7 @@ def save_prediction_results(
 def _resolve_detector(
     detector_backend: str,
     model_id: str | None,
-) -> tuple[str, str, GroundingDINOHandler | QwenVLMHandler]:
+) -> tuple[str, str, GroundingDINOHandler | QwenVLMHandler | InternVLHandler]:
     """Resolve backend name, model id, and detector instance."""
     normalized_backend = detector_backend.strip().lower()
 
@@ -77,7 +78,13 @@ def _resolve_detector(
         resolved_model_id = model_id or QWEN_DEFAULT_MODEL_ID
         return normalized_backend, resolved_model_id, QwenVLMHandler(model_id=resolved_model_id)
 
-    raise typer.BadParameter(f"Unsupported detector backend '{detector_backend}'. Use 'grounding_dino' or 'qwen_vlm'.")
+    if normalized_backend == "intern_vl":
+        resolved_model_id = model_id or INTERNVL_DEFAULT_MODEL_ID
+        return normalized_backend, resolved_model_id, InternVLHandler(model_id=resolved_model_id)
+
+    raise typer.BadParameter(
+        f"Unsupported detector backend '{detector_backend}'. Use 'grounding_dino', 'qwen_vlm', or 'intern_vl'."
+    )
 
 
 def _extract_query_categories(category_names: list[str]) -> list[str]:
@@ -94,7 +101,7 @@ def _extract_query_categories(category_names: list[str]) -> list[str]:
 
 
 def _predict_with_backend(
-    detector: GroundingDINOHandler | QwenVLMHandler,
+    detector: GroundingDINOHandler | QwenVLMHandler | InternVLHandler,
     normalized_backend: str,
     image: Tensor,
     query_categories: list[str],
@@ -112,12 +119,20 @@ def _predict_with_backend(
             return_debug_outputs=qwen_return_debug_outputs,
         )
 
+    if normalized_backend == "intern_vl":
+        return detector.predict(
+            image,
+            query_categories,
+            max_detections_per_category=qwen_max_detections_per_category,
+            return_debug_outputs=qwen_return_debug_outputs,
+        )
+
     return detector.predict(image, query_categories)
 
 
 def _boxes_for_visualization(normalized_backend: str, boxes: Tensor) -> Tensor:
     """Return boxes in xyxy format for rendering."""
-    if normalized_backend != "qwen_vlm":
+    if normalized_backend not in {"qwen_vlm", "intern_vl"}:
         return boxes
 
     return cxcywh_tensor_to_xyxy(boxes)
@@ -246,7 +261,7 @@ def _write_qwen_debug_record(
 def _run_inference_loop(
     data_loader: DataLoader,
     dataset: Task1DetectionDataset,
-    detector: GroundingDINOHandler | QwenVLMHandler,
+    detector: GroundingDINOHandler | QwenVLMHandler | InternVLHandler,
     normalized_backend: str,
     qwen_max_detections_per_category: int,
     qwen_temperature: float,
@@ -326,7 +341,7 @@ def run_task1_baseline(
     limit: int = typer.Option(20, help="Number of samples to evaluate for testing."),
     detector_backend: str = typer.Option(
         "grounding_dino",
-        help="Detector backend: grounding_dino or qwen_vlm.",
+        help="Detector backend: grounding_dino, qwen_vlm, or intern_vl.",
     ),
     model_id: str | None = typer.Option(
         None,

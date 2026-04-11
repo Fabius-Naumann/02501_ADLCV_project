@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ from transformers import (
     AutoModelForZeroShotObjectDetection,
     AutoProcessor,
     AutoTokenizer,
+    PreTrainedModel,
 )
 
 from detgpt.box_utils import xyxy_to_cxcywh
@@ -455,15 +457,62 @@ class InternVLHandler(QwenVLMHandler):
         "Do not include markdown, comments, or any extra text."
     )
 
+    @staticmethod
+    @contextmanager
+    def _disable_transformers_meta_init():
+        """Temporarily remove transformers' global meta-init context for remote InternVL loading."""
+        original_get_init_context_method = getattr(PreTrainedModel, "get_init_context", None)
+        original_mark_tied_weights = getattr(PreTrainedModel, "mark_tied_weights_as_initialized", None)
+
+        did_patch_get_init_context = False
+        did_patch_mark_tied_weights = False
+
+        def patched_get_init_context(cls, dtype, is_quantized, is_ds_init_called, allow_all_kernels):
+            assert original_get_init_context_method is not None
+            original_get_init_context = original_get_init_context_method.__func__
+            contexts = original_get_init_context(cls, dtype, is_quantized, is_ds_init_called, allow_all_kernels)
+            return [
+                ctx
+                for ctx in contexts
+                if not (isinstance(ctx, torch.device) and ctx.type == "meta")
+            ]
+
+        def patched_mark_tied_weights_as_initialized(self, loading_info):
+            assert original_mark_tied_weights is not None
+            # Some trust_remote_code models (including InternVL) don't define this new field yet.
+            if not hasattr(self, "all_tied_weights_keys"):
+                return None
+            return original_mark_tied_weights(self, loading_info)
+
+        if original_get_init_context_method is not None:
+            PreTrainedModel.get_init_context = classmethod(patched_get_init_context)
+            did_patch_get_init_context = True
+
+        if original_mark_tied_weights is not None:
+            PreTrainedModel.mark_tied_weights_as_initialized = patched_mark_tied_weights_as_initialized
+            did_patch_mark_tied_weights = True
+
+        try:
+            yield
+        finally:
+            if did_patch_get_init_context and original_get_init_context_method is not None:
+                PreTrainedModel.get_init_context = original_get_init_context_method
+
+            if did_patch_mark_tied_weights and original_mark_tied_weights is not None:
+                PreTrainedModel.mark_tied_weights_as_initialized = original_mark_tied_weights
+
     def __init__(self, model_id: str = "OpenGVLab/InternVL2_5-8B") -> None:
         """Initialize model and processor."""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = AutoModel.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            use_flash_attn=True,
-            trust_remote_code=True).to(self.device)
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        with self._disable_transformers_meta_init():
+            self.model = AutoModel.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=False,
+                use_flash_attn=self.device == "cuda",
+                trust_remote_code=True,
+            ).to(self.device)
         self.model.eval()
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
