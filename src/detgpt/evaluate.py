@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime
 from typing import Any
@@ -145,6 +146,7 @@ def run_task1_baseline(
 
     predictions: list[dict[str, Any]] = []
     ground_truth: list[dict[str, Any]] = []
+    summary_data: list[dict[str, Any]] = []
 
     for index, (images, targets) in enumerate(data_loader):
         if index >= limit:
@@ -172,6 +174,15 @@ def run_task1_baseline(
                     "scores": [],
                 }
             )
+            summary_data.append(
+                {
+                    "image_id": target["image_id"].item() if "image_id" in target else index,
+                    "num_gt": len(target["boxes"]),
+                    "num_pred": 0,
+                    "categories": "",
+                    "avg_score": 0.0,
+                }
+            )
             continue
 
         if normalized_backend == "qwen_vlm":
@@ -187,13 +198,34 @@ def run_task1_baseline(
 
         predictions.append(_prediction_record(image_path, normalized_backend, detections))
 
+        scores_tensor = detections["scores"]
+        summary_data.append(
+            {
+                "image_id": target["image_id"].item() if "image_id" in target else index,
+                "num_gt": len(target["boxes"]),
+                "num_pred": len(detections["boxes"]),
+                "categories": "|".join(query_categories),
+                "avg_score": float(scores_tensor.mean().item()) if len(scores_tensor) > 0 else 0.0,
+            }
+        )
+
     metrics = evaluate_dataset(predictions=predictions, ground_truth=ground_truth)
 
     metrics_path = run_dir / "metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file_handle:
         json.dump(metrics, file_handle, indent=2)
 
+    summary_path = run_dir / "detections_summary.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as file_handle:
+        writer = csv.DictWriter(
+            file_handle,
+            fieldnames=["image_id", "num_gt", "num_pred", "categories", "avg_score"],
+        )
+        writer.writeheader()
+        writer.writerows(summary_data)
+
     logger.info("Saved metrics to {}", metrics_path)
+    logger.info("Saved detection summary to {}", summary_path)
     logger.info(
         "AP50={:.4f}, AP75={:.4f}, mean_AP_50_75={:.4f}",
         float(metrics["AP50"]["ap"]),
