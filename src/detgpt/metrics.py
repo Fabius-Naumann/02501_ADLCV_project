@@ -188,7 +188,7 @@ def evaluate_class_at_threshold(
     iou_threshold: float,
 ) -> dict[str, float | int | str]:
     """Evaluate one class at one IoU threshold."""
-    gt_index = build_gt_index(ground_truth)
+    gt_index_by_image = build_gt_index(ground_truth)
     total_gt = _count_gt_for_class(ground_truth, class_name)
     pred_entries = _prepare_predictions_for_class(predictions, class_name)
 
@@ -201,7 +201,7 @@ def evaluate_class_at_threshold(
         image_path = pred_entry["image_path"]
         pred_box = pred_entry["box"]
 
-        gt_record = gt_index.get(
+        gt_record = gt_index_by_image.get(
             image_path,
             {
                 "image_path": image_path,
@@ -214,11 +214,11 @@ def evaluate_class_at_threshold(
         gt_labels = gt_record["labels"]
 
         best_iou = -1.0
-        best_gt_index = -1
+        best_gt_match_index = -1
         used_gt_indices = matched_gt_indices_by_image[image_path]
 
-        for gt_index, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels, strict=True)):
-            if gt_index in used_gt_indices:
+        for gt_match_index, (gt_box, gt_label) in enumerate(zip(gt_boxes, gt_labels, strict=True)):
+            if gt_match_index in used_gt_indices:
                 continue
             if str(gt_label) != class_name:
                 continue
@@ -226,10 +226,10 @@ def evaluate_class_at_threshold(
             iou = compute_iou_cxcywh(pred_box, gt_box)
             if iou >= iou_threshold and iou > best_iou:
                 best_iou = iou
-                best_gt_index = gt_index
+                best_gt_match_index = gt_match_index
 
-        if best_gt_index >= 0:
-            used_gt_indices.add(best_gt_index)
+        if best_gt_match_index >= 0:
+            used_gt_indices.add(best_gt_match_index)
             tp_flags.append(1)
             fp_flags.append(0)
         else:
@@ -355,10 +355,10 @@ def evaluate_image(
 
     for pred_box, pred_label, _ in pred_items:
         best_iou = -1.0
-        best_gt_index = -1
+        best_gt_match_index = -1
 
-        for gt_index, (gt_box, gt_label) in enumerate(zip(gt["boxes"], gt["labels"], strict=True)):
-            if gt_index in matched_gt_indices:
+        for gt_match_index, (gt_box, gt_label) in enumerate(zip(gt["boxes"], gt["labels"], strict=True)):
+            if gt_match_index in matched_gt_indices:
                 continue
             if str(pred_label) != str(gt_label):
                 continue
@@ -366,10 +366,10 @@ def evaluate_image(
             iou = compute_iou_cxcywh(pred_box, gt_box)
             if iou >= iou_threshold and iou > best_iou:
                 best_iou = iou
-                best_gt_index = gt_index
+                best_gt_match_index = gt_match_index
 
-        if best_gt_index >= 0:
-            matched_gt_indices.add(best_gt_index)
+        if best_gt_match_index >= 0:
+            matched_gt_indices.add(best_gt_match_index)
             tp += 1
         else:
             fp += 1
