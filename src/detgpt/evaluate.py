@@ -13,8 +13,7 @@ from torch.utils.data import DataLoader
 from detgpt import OUTPUTS_DIR
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.metrics import evaluate_dataset
-from detgpt.model import GroundingDINOHandler, QwenVLMHandler
-from detgpt.yolo_world import YOLOWorldHandler
+from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
