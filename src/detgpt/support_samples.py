@@ -23,7 +23,7 @@ def _to_uint8_image(image: Tensor) -> Tensor:
     return image_cpu.to(dtype=torch.uint8)
 
 
-def _render_support_image(image: Tensor, target: dict[str, Any], category_name: str | None = None) -> Tensor:
+def _render_support_image(image: Tensor, target: dict[str, Any], category_name: str | None = None, type: str | None = "box") -> Tensor:
     """Render support image with annotation boxes for one target class only."""
     image_u8 = _to_uint8_image(image)
     boxes_any = target.get("boxes")
@@ -50,12 +50,28 @@ def _render_support_image(image: Tensor, target: dict[str, Any], category_name: 
     selected_boxes = boxes_any[selected_indices]
     boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
 
-    return draw_bounding_boxes(
-        image=image_u8,
-        boxes=boxes_xyxy,
-        colors="red",
-        width=3,
-    )
+    if type == "box":
+        return draw_bounding_boxes(
+            image=image_u8,
+            boxes=boxes_xyxy,
+            colors="red",
+            width=3,
+        )
+    elif type == "mark":
+        # Mark the center of the boxes instead of drawing full boxes.
+        centers = (boxes_xyxy[:, :2] + boxes_xyxy[:, 2:]) // 2
+        marked_image = image_u8.clone()
+        for center in centers:
+            x, y = center.tolist()
+            radius = 7
+            left = max(0, x - radius)
+            right = min(image_u8.shape[2], x + radius)
+            top = max(0, y - radius)
+            bottom = min(image_u8.shape[1], y + radius)
+            marked_image[:, top:bottom, left:right] = torch.tensor([255, 0, 0], dtype=torch.uint8).view(3, 1, 1)
+        return marked_image
+    else:
+        raise ValueError(f"Unsupported type '{type}'. Use 'box' or 'mark'.")
 
 
 def _resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
@@ -72,6 +88,7 @@ def side_by_side(
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
+    type: str | None = "box",
 ) -> Image.Image:
     """Compose support example(s) and query image into one side-by-side image.
 
@@ -90,7 +107,7 @@ def side_by_side(
     supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
 
     support_panels = [
-        to_pil_image(_render_support_image(image, target, category_name=support_category_name))
+        to_pil_image(_render_support_image(image, target, category_name=support_category_name, type=type))
         for image, target in supports
     ]
     query_panel = to_pil_image(_to_uint8_image(target_img))
@@ -120,6 +137,7 @@ def cropped_side_by_side(
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
+    type: str | None = "box",
 ) -> Image.Image:
     """Compose support example(s) and query image into one side-by-side image, cropping to target class
 
@@ -173,8 +191,44 @@ def cropped_side_by_side(
         support_category_name=support_category_name,
         output_path=output_path,
         spacing=spacing,
+        type=type,
     )
 
+def marked_side_by_side(
+    target_img: Tensor,
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+    output_path: Path | None = None,
+    spacing: int = 8,
+    type: str | None = "mark",
+) -> Image.Image:
+    """Compose support example(s) and query image into one side-by-side image, marking target class
+
+    Args:
+        target_img: Query image tensor (``C x H x W``) without annotations.
+        n_support_img: One or more support tuples of ``(image, target)``.
+            Support ``target`` must contain ``boxes`` in ``cxcywh`` and may include
+            ``category_names`` for label text.
+        support_category_name: Class name to annotate on support panels.
+        output_path: Optional path to save the combined image.
+        spacing: Horizontal spacing in pixels between panels.
+        type: Type of marking to apply (e.g., "box", "mark").
+    Returns:
+        Combined ``PIL.Image`` where support panels are left and query is right, with target class marked.
+    """
+    marked_supports = []
+    for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
+        marked_image = _render_support_image(image, target, category_name=support_category_name, type=type)
+        marked_supports.append((marked_image, target))
+    
+    return side_by_side(
+        target_img=target_img,
+        n_support_img=marked_supports,
+        support_category_name=support_category_name,
+        output_path=output_path,
+        spacing=spacing,
+        type=type,
+    )
 
 def _find_support_indices(
     dataset: Task1DetectionDataset,
@@ -244,3 +298,13 @@ if __name__ == "__main__":
     )
 
     print(f"Saved cropped combined image to: {FIGURES_DIR / 'support_query_cropped_side_by_side.png'}")
+
+    combined_marked = marked_side_by_side(
+        target_img=query_img,
+        n_support_img=support_samples,
+        support_category_name=chosen_category,
+        output_path=FIGURES_DIR / "support_query_marked_side_by_side.png",
+        type="mark",
+    )
+
+    print(f"Saved marked combined image to: {FIGURES_DIR / 'support_query_marked_side_by_side.png'}")
