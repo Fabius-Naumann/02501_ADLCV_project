@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -7,6 +9,7 @@ import torch
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
+from ultralytics import YOLOWorld
 
 from detgpt.box_utils import xyxy_to_cxcywh
 
@@ -82,6 +85,69 @@ class GroundingDINOHandler:
         boxes = boxes[:count]
         scores = scores[:count]
         labels = labels[:count]
+
+        return {
+            "boxes": boxes,
+            "scores": scores,
+            "labels": labels,
+        }
+
+
+class YOLOWorldHandler:
+    """Wrapper for YOLO-World zero-shot object detection."""
+
+    def __init__(
+        self,
+        model_id: str = "yolov8s-world.pt",
+        imgsz: int = 640,
+        conf: float = 0.05,
+        device: str = "cpu",
+    ) -> None:
+        self.model = YOLOWorld(model_id)
+        self.imgsz = imgsz
+        self.conf = conf
+        self.device = device
+
+        # CPU is the default/recommended workaround for the CLIP text-encoder
+        # device mismatch that can occur in set_classes(...), but the device
+        # remains configurable.
+        self.model.to(self.device)
+
+    def predict(self, image: Tensor, query_categories: list[str]) -> dict[str, Tensor | list[str]]:
+        """Run YOLO-World on one image and return normalized predictions."""
+        if not query_categories:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
+
+        self.model.set_classes(query_categories)
+
+        # Ultralytics expects HWC numpy input
+        image_np = image.permute(1, 2, 0).mul(255).clamp(0, 255).byte().cpu().numpy()
+
+        results = self.model.predict(
+            source=image_np,
+            imgsz=self.imgsz,
+            conf=self.conf,
+            verbose=False,
+            device=self.device,
+        )
+
+        result = results[0]
+
+        if result.boxes is None or len(result.boxes) == 0:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
+
+        boxes = result.boxes.xyxy.detach().cpu().to(torch.float32)
+        scores = result.boxes.conf.detach().cpu().to(torch.float32)
+        class_indices = [int(value) for value in result.boxes.cls.detach().cpu().tolist()]
+        labels = [query_categories[index] for index in class_indices]
 
         return {
             "boxes": boxes,
