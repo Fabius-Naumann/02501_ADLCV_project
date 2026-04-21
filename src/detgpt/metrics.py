@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from detgpt.box_utils import compute_iou_cxcywh
@@ -101,6 +101,18 @@ def build_gt_index(ground_truth: list[dict[str, Any]]) -> dict[str, dict[str, An
     return index
 
 
+def _count_gt_by_class(ground_truth: list[dict[str, Any]]) -> dict[str, int]:
+    """Count ground-truth boxes per class across the dataset."""
+    counts: Counter[str] = Counter()
+
+    for gt in ground_truth:
+        validate_record(gt, require_scores=False)
+        for label in gt["labels"]:
+            counts[str(label)] += 1
+
+    return dict(counts)
+
+
 def _compute_ap_from_pr(precisions: list[float], recalls: list[float]) -> float:
     """Compute AP from a precision-recall curve using precision-envelope integration."""
     if not precisions or not recalls:
@@ -141,19 +153,6 @@ def _extract_all_classes(
     return sorted(classes)
 
 
-def _count_gt_for_class(
-    ground_truth: list[dict[str, Any]],
-    class_name: str,
-) -> int:
-    """Count ground-truth boxes for a class across the dataset."""
-    total = 0
-    for gt in ground_truth:
-        for label in gt["labels"]:
-            if str(label) == class_name:
-                total += 1
-    return total
-
-
 def _prepare_predictions_for_class(
     predictions: list[dict[str, Any]],
     class_name: str,
@@ -183,13 +182,13 @@ def _prepare_predictions_for_class(
 
 def evaluate_class_at_threshold(
     predictions: list[dict[str, Any]],
-    ground_truth: list[dict[str, Any]],
+    gt_index_by_image: dict[str, dict[str, Any]],
+    gt_count_by_class: dict[str, int],
     class_name: str,
     iou_threshold: float,
 ) -> dict[str, float | int | str]:
     """Evaluate one class at one IoU threshold."""
-    gt_index_by_image = build_gt_index(ground_truth)
-    total_gt = _count_gt_for_class(ground_truth, class_name)
+    total_gt = gt_count_by_class.get(class_name, 0)
     pred_entries = _prepare_predictions_for_class(predictions, class_name)
 
     matched_gt_indices_by_image: dict[str, set[int]] = defaultdict(set)
@@ -288,6 +287,8 @@ def evaluate_dataset_at_threshold(
 ) -> dict[str, Any]:
     """Evaluate dataset at a given IoU threshold using class-wise AP and macro averaging."""
     classes = _extract_all_classes(predictions, ground_truth)
+    gt_index_by_image = build_gt_index(ground_truth)
+    gt_count_by_class = _count_gt_by_class(ground_truth)
 
     per_class: list[dict[str, float | int | str]] = []
     valid_class_aps: list[float] = []
@@ -301,7 +302,8 @@ def evaluate_dataset_at_threshold(
     for class_name in classes:
         class_result = evaluate_class_at_threshold(
             predictions=predictions,
-            ground_truth=ground_truth,
+            gt_index_by_image=gt_index_by_image,
+            gt_count_by_class=gt_count_by_class,
             class_name=class_name,
             iou_threshold=iou_threshold,
         )
