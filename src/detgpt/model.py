@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -7,6 +9,7 @@ import torch
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
+from ultralytics import YOLOWorld
 
 from detgpt.box_utils import xyxy_to_cxcywh
 
@@ -32,7 +35,12 @@ class GroundingDINOHandler:
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
 
-    def predict(self, image_tensor: Tensor, category_names: list[str], threshold: float = 0.3):
+    def predict(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        threshold: float = 0.3,
+    ) -> dict[str, Tensor | list[str]]:
         """
         Run inference on a single image tensor.
 
@@ -40,29 +48,112 @@ class GroundingDINOHandler:
             image_tensor: C x H x W tensor from Task1DetectionDataset.
             category_names: List of labels to find (e.g., ["cat", "dog"]).
             threshold: Confidence threshold for detections.
+
+        Returns:
+            Dictionary with:
+                - boxes: Tensor[N, 4] in xyxy pixel coordinates
+                - scores: Tensor[N]
+                - labels: list[str] of length N
         """
-        # 1. Format text prompt: Grounding DINO prefers "item1 . item2 . item3 ."
         cleaned_category_names = [name.strip() for name in category_names if name.strip()]
         unique_category_names = list(dict.fromkeys(cleaned_category_names))
         text_prompt = ". ".join(unique_category_names) + "."
 
-        # 2. Convert tensor back to PIL for the processor
-        # (Processor handles normalization and resizing internally)
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
         inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        # 3. Post-process to get boxes in pixel coordinates
-        return self.processor.post_process_grounded_object_detection(
+        result = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
             threshold=threshold,
             text_threshold=threshold,
             target_sizes=[image_pil.size[::-1]],
-        )[0]  # Contains 'boxes', 'scores', 'labels'
+        )[0]
+
+        boxes = result["boxes"]
+        scores = result["scores"]
+
+        raw_labels = result["text_labels"] if "text_labels" in result else result["labels"]
+        labels = [str(label) for label in raw_labels]
+
+        count = min(len(boxes), len(scores), len(labels))
+        boxes = boxes[:count]
+        scores = scores[:count]
+        labels = labels[:count]
+
+        return {
+            "boxes": boxes,
+            "scores": scores,
+            "labels": labels,
+        }
+
+
+class YOLOWorldHandler:
+    """Wrapper for YOLO-World zero-shot object detection."""
+
+    def __init__(
+        self,
+        model_id: str = "yolov8s-world.pt",
+        imgsz: int = 640,
+        conf: float = 0.05,
+        device: str = "cpu",
+    ) -> None:
+        self.model = YOLOWorld(model_id)
+        self.imgsz = imgsz
+        self.conf = conf
+        self.device = device
+
+        # CPU is the default/recommended workaround for the CLIP text-encoder
+        # device mismatch that can occur in set_classes(...), but the device
+        # remains configurable.
+        self.model.to(self.device)
+
+    def predict(self, image: Tensor, query_categories: list[str]) -> dict[str, Tensor | list[str]]:
+        """Run YOLO-World on one image and return normalized predictions."""
+        if not query_categories:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
+
+        self.model.set_classes(query_categories)
+
+        # Ultralytics expects HWC numpy input
+        image_np = image.permute(1, 2, 0).mul(255).clamp(0, 255).byte().cpu().numpy()
+
+        results = self.model.predict(
+            source=image_np,
+            imgsz=self.imgsz,
+            conf=self.conf,
+            verbose=False,
+            device=self.device,
+        )
+
+        result = results[0]
+
+        if result.boxes is None or len(result.boxes) == 0:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
+
+        boxes = result.boxes.xyxy.detach().cpu().to(torch.float32)
+        scores = result.boxes.conf.detach().cpu().to(torch.float32)
+        class_indices = [int(value) for value in result.boxes.cls.detach().cpu().tolist()]
+        labels = [query_categories[index] for index in class_indices]
+
+        return {
+            "boxes": boxes,
+            "scores": scores,
+            "labels": labels,
+        }
 
 
 class QwenVLMHandler:
