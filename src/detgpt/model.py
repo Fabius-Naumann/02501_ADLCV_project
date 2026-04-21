@@ -32,7 +32,12 @@ class GroundingDINOHandler:
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
 
-    def predict(self, image_tensor: Tensor, category_names: list[str], threshold: float = 0.3):
+    def predict(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        threshold: float = 0.3,
+    ) -> dict[str, Tensor | list[str]]:
         """
         Run inference on a single image tensor.
 
@@ -40,29 +45,49 @@ class GroundingDINOHandler:
             image_tensor: C x H x W tensor from Task1DetectionDataset.
             category_names: List of labels to find (e.g., ["cat", "dog"]).
             threshold: Confidence threshold for detections.
+
+        Returns:
+            Dictionary with:
+                - boxes: Tensor[N, 4] in xyxy pixel coordinates
+                - scores: Tensor[N]
+                - labels: list[str] of length N
         """
-        # 1. Format text prompt: Grounding DINO prefers "item1 . item2 . item3 ."
         cleaned_category_names = [name.strip() for name in category_names if name.strip()]
         unique_category_names = list(dict.fromkeys(cleaned_category_names))
         text_prompt = ". ".join(unique_category_names) + "."
 
-        # 2. Convert tensor back to PIL for the processor
-        # (Processor handles normalization and resizing internally)
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
         inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        # 3. Post-process to get boxes in pixel coordinates
-        return self.processor.post_process_grounded_object_detection(
+        result = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
             threshold=threshold,
             text_threshold=threshold,
             target_sizes=[image_pil.size[::-1]],
-        )[0]  # Contains 'boxes', 'scores', 'labels'
+        )[0]
+
+        boxes = result["boxes"]
+        scores = result["scores"]
+
+        raw_labels = result["text_labels"] if "text_labels" in result else result["labels"]
+        labels = [str(label) for label in raw_labels]
+
+        count = min(len(boxes), len(scores), len(labels))
+        boxes = boxes[:count]
+        scores = scores[:count]
+        labels = labels[:count]
+
+        return {
+            "boxes": boxes,
+            "scores": scores,
+            "labels": labels,
+        }
 
 
 class QwenVLMHandler:
