@@ -138,3 +138,32 @@ The directory structure of the project looks like this:
 Created using [mlops_template](https://github.com/SkafteNicki/mlops_template),
 a [cookiecutter template](https://github.com/cookiecutter/cookiecutter) for getting
 started with Machine Learning Operations (MLOps).
+
+## Dataset
+
+### Rare classes
+Validated against `data/processed/categories_lvis_train.txt`.
+
+For zero-shot stress testing on modern VLMs, prioritize globally long-tail classes
+(niche objects, old-fashioned artifacts, and taxonomy-specific labels), not only local LVIS rarity.
+
+Zero-shot priority shortlist (all targets have 10+ occurrences in this split):
+
+- cincture (18): negatives -> belt, necklace, earring
+- yoke_(animal_equipment) (11): negatives -> headstall_(for_horses), blinder_(for_horses), necktie
+- knocker_(on_a_door) (10): negatives -> doorknob, handle, bell
+- poker_(fire_stirring_tool) (14): negatives -> crowbar, screwdriver, bottle_opener
+- pew_(church_bench) (14): negatives -> bench, chair
+- mail_slot (15): negatives -> mailbox_(at_home), postbox_(public), envelope
+- cufflink (15): negatives -> bracelet, earring, ring
+- oil_lamp (15): negatives -> lamp, lantern, candle
+- gravy_boat (10): negatives -> bowl, pot, pitcher_(vessel_for_liquid)
+- quiche (10): negatives -> pie, pizza, omelet
+
+Reserve/secondary targets (valid but likely less globally rare):
+
+- parakeet (11): negatives -> bird, pigeon, hummingbird
+- bean_curd (24): negatives -> hummus, sour_cream, mashed_potato
+- plow_(farm_equipment) (10): negatives -> power_shovel, shovel
+- chap (10): negatives -> trousers, jumpsuit
+- parchment (10): negatives -> booklet, map, notebook
