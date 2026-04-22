@@ -8,9 +8,9 @@ from detgpt.box_utils import cxcywh_to_xyxy
 from detgpt.lvis_api import default_manifest_path
 
 
-def _load_manifest(split: str) -> list[dict[str, Any]]:
-    """Load a prepared manifest for a split."""
-    manifest_path = default_manifest_path(split)
+def _load_manifest_from_path(manifest_path: str | Path) -> list[dict[str, Any]]:
+    """Load a manifest from an explicit path."""
+    manifest_path = Path(manifest_path)
     with manifest_path.open("r", encoding="utf-8") as file:
         data = json.load(file)
 
@@ -18,6 +18,12 @@ def _load_manifest(split: str) -> list[dict[str, Any]]:
         raise ValueError("Manifest JSON must contain a list of samples.")
 
     return data
+
+
+def _load_manifest_from_split(split: str) -> list[dict[str, Any]]:
+    """Load the default manifest for a split."""
+    manifest_path = default_manifest_path(split)
+    return _load_manifest_from_path(manifest_path)
 
 
 def _centered_dict_to_cxcywh(centered: dict[str, Any]) -> list[float]:
@@ -51,22 +57,12 @@ def _annotation_to_coco_bbox(annotation: dict[str, Any]) -> list[float]:
     return [0.0, 0.0, 0.0, 0.0]
 
 
-def export_manifest_to_coco(
-    split: str,
+def _export_manifest_records_to_coco(
+    manifest: list[dict[str, Any]],
     output_path: str | Path,
     class_names: list[str] | None = None,
 ) -> None:
-    """
-    Export prepared manifest to COCO-style JSON.
-
-    Output structure:
-    {
-      "images": [...],
-      "annotations": [...],
-      "categories": [...]
-    }
-    """
-    manifest = _load_manifest(split)
+    """Export manifest records to COCO-style JSON."""
     allowed = set(class_names) if class_names else None
 
     images: list[dict[str, Any]] = []
@@ -123,25 +119,12 @@ def export_manifest_to_coco(
         json.dump(payload, file, indent=2)
 
 
-def export_manifest_to_eval_json(
-    split: str,
+def _export_manifest_records_to_eval_json(
+    manifest: list[dict[str, Any]],
     output_path: str | Path,
     class_names: list[str] | None = None,
 ) -> None:
-    """
-    Export prepared manifest to the project's eval JSON format.
-
-    Output structure:
-    [
-      {
-        "image_path": str,
-        "boxes": [[cx, cy, w, h], ...],
-        "labels": [str, ...]
-      },
-      ...
-    ]
-    """
-    manifest = _load_manifest(split)
+    """Export manifest records to the project's eval JSON format."""
     allowed = set(class_names) if class_names else None
 
     records: list[dict[str, Any]] = []
@@ -177,3 +160,43 @@ def export_manifest_to_eval_json(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(records, file, indent=2)
+
+
+def export_manifest_to_coco(
+    split: str,
+    output_path: str | Path,
+    class_names: list[str] | None = None,
+) -> None:
+    """Export the default split manifest to COCO-style JSON."""
+    manifest = _load_manifest_from_split(split)
+    _export_manifest_records_to_coco(manifest, output_path, class_names)
+
+
+def export_manifest_to_eval_json(
+    split: str,
+    output_path: str | Path,
+    class_names: list[str] | None = None,
+) -> None:
+    """Export the default split manifest to eval-format JSON."""
+    manifest = _load_manifest_from_split(split)
+    _export_manifest_records_to_eval_json(manifest, output_path, class_names)
+
+
+def export_manifest_file_to_coco(
+    manifest_path: str | Path,
+    output_path: str | Path,
+    class_names: list[str] | None = None,
+) -> None:
+    """Export an explicit manifest file to COCO-style JSON."""
+    manifest = _load_manifest_from_path(manifest_path)
+    _export_manifest_records_to_coco(manifest, output_path, class_names)
+
+
+def export_manifest_file_to_eval_json(
+    manifest_path: str | Path,
+    output_path: str | Path,
+    class_names: list[str] | None = None,
+) -> None:
+    """Export an explicit manifest file to eval-format JSON."""
+    manifest = _load_manifest_from_path(manifest_path)
+    _export_manifest_records_to_eval_json(manifest, output_path, class_names)
