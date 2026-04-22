@@ -33,10 +33,7 @@ def _render_support_image(
     if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
         return image_u8
 
-    if isinstance(category_names_any, list):
-        category_names = [str(name) for name in category_names_any]
-    else:
-        category_names = []
+    category_names = [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
 
     if category_name is None:
         category_name = next((name for name in category_names if name.strip()), None)
@@ -78,22 +75,22 @@ def _resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
     """Resize an image to a shared height while preserving aspect ratio."""
     if image.height == target_height:
         return image
-    new_width = max(1, int(round(image.width * (target_height / image.height))))
+    new_width = max(1, round(image.width * (target_height / image.height)))
     return image.resize((new_width, target_height), resample=Image.Resampling.BILINEAR)
 
 
 def side_by_side(
-    target_img: Tensor,
+    target_img: Tensor | None,
     n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
     type: str | None = "box",
 ) -> Image.Image:
-    """Compose support example(s) and query image into one side-by-side image.
+    """Compose support example(s) and an optional query image into one image.
 
     Args:
-        target_img: Query image tensor (``C x H x W``) without annotations.
+        target_img: Optional query image tensor (``C x H x W``) without annotations.
         n_support_img: One or more support tuples of ``(image, target)``.
             Support ``target`` must contain ``boxes`` in ``cxcywh`` and may include
             ``category_names`` for label text.
@@ -102,19 +99,23 @@ def side_by_side(
         spacing: Horizontal spacing in pixels between panels.
 
     Returns:
-        Combined ``PIL.Image`` where support panels are left and query is right.
+        Combined ``PIL.Image`` where support panels are left and the query is right
+        when ``target_img`` is provided.
     """
     supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
 
-    support_panels = [
+    panels = [
         to_pil_image(_render_support_image(image, target, category_name=support_category_name, type=type))
         for image, target in supports
     ]
-    query_panel = to_pil_image(_to_uint8_image(target_img))
-    all_panels = [*support_panels, query_panel]
+    if target_img is not None:
+        panels.append(to_pil_image(_to_uint8_image(target_img)))
 
-    max_height = max(panel.height for panel in all_panels)
-    resized_panels = [_resize_to_height(panel, max_height) for panel in all_panels]
+    if not panels:
+        raise ValueError("At least one support image or a query image is required to compose panels.")
+
+    max_height = max(panel.height for panel in panels)
+    resized_panels = [_resize_to_height(panel, max_height) for panel in panels]
 
     total_width = sum(panel.width for panel in resized_panels) + spacing * (len(resized_panels) - 1)
     canvas = Image.new("RGB", (total_width, max_height), color=(255, 255, 255))
@@ -132,17 +133,17 @@ def side_by_side(
 
 
 def cropped_side_by_side(
-    target_img: Tensor,
+    target_img: Tensor | None,
     n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
     type: str | None = "box",
 ) -> Image.Image:
-    """Compose support example(s) and query image into one side-by-side image, cropping to target class
+    """Compose support example(s) and an optional query image, cropping support to target class.
 
     Args:
-        target_img: Query image tensor (``C x H x W``) without annotations.
+        target_img: Optional query image tensor (``C x H x W``) without annotations.
         n_support_img: One or more support tuples of ``(image, target)``.
             Support ``target`` must contain ``boxes`` in ``cxcywh`` and may include
             ``category_names`` for label text.
@@ -150,7 +151,7 @@ def cropped_side_by_side(
         output_path: Optional path to save the combined image.
         spacing: Horizontal spacing in pixels between panels.
     Returns:
-        Combined ``PIL.Image`` where support panels are left and query is right, cropped to target class.
+        Combined ``PIL.Image`` with cropped support panels and an optional query image.
     """
     cropped_supports = []
     for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
@@ -159,10 +160,7 @@ def cropped_side_by_side(
         if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
             continue
 
-        if isinstance(category_names_any, list):
-            category_names = [str(name) for name in category_names_any]
-        else:
-            category_names = []
+        category_names = [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
 
         if support_category_name is None:
             support_category_name = next((name for name in category_names if name.strip()), None)
@@ -196,17 +194,17 @@ def cropped_side_by_side(
 
 
 def marked_side_by_side(
-    target_img: Tensor,
+    target_img: Tensor | None,
     n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
     type: str | None = "mark",
 ) -> Image.Image:
-    """Compose support example(s) and query image into one side-by-side image, marking target class
+    """Compose support example(s) and an optional query image, marking target class.
 
     Args:
-        target_img: Query image tensor (``C x H x W``) without annotations.
+        target_img: Optional query image tensor (``C x H x W``) without annotations.
         n_support_img: One or more support tuples of ``(image, target)``.
             Support ``target`` must contain ``boxes`` in ``cxcywh`` and may include
             ``category_names`` for label text.
@@ -215,7 +213,7 @@ def marked_side_by_side(
         spacing: Horizontal spacing in pixels between panels.
         type: Type of marking to apply (e.g., "box", "mark").
     Returns:
-        Combined ``PIL.Image`` where support panels are left and query is right, with target class marked.
+        Combined ``PIL.Image`` with marked support panels and an optional query image.
     """
     marked_supports = []
     for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
@@ -232,7 +230,7 @@ def marked_side_by_side(
     )
 
 
-def _find_support_indices(
+def find_support_indices(
     dataset: Task1DetectionDataset,
     category_name: str,
     query_index: int,
@@ -269,7 +267,7 @@ if __name__ == "__main__":
         raise ValueError("Query image has no categories. Choose another query_index.")
 
     chosen_category = query_categories[0]
-    support_indices = _find_support_indices(
+    support_indices = find_support_indices(
         dataset=dataset,
         category_name=chosen_category,
         query_index=query_index,
