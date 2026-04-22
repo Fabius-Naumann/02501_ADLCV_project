@@ -244,7 +244,7 @@ name = "cuda-bindings"
 version = "12.9.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "sys_platform != 'darwin'" },
+    { name = "cuda-pathfinder", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/50/04/8a4d45dc154a8a32982658cc55be291e9778d1197834b15d33427e2f65c1/cuda_bindings-12.9.6-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0ea331bc47d9988cc61f0ecc5fa8df9dd188b4493ae1c6688bb1ee8ce8ba1af4", size = 7050347, upload-time = "2026-03-11T14:47:35.221Z" },
@@ -277,37 +277,37 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'linux'" },
 ]
 cufft = [
-    { name = "nvidia-cufft-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cufft-cu12", marker = "sys_platform == 'linux'" },
 ]
 cufile = [
     { name = "nvidia-cufile-cu12", marker = "sys_platform == 'linux'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "sys_platform == 'linux'" },
 ]
 curand = [
-    { name = "nvidia-curand-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-curand-cu12", marker = "sys_platform == 'linux'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusolver-cu12", marker = "sys_platform == 'linux'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusparse-cu12", marker = "sys_platform == 'linux'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform == 'linux'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "sys_platform == 'linux'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvtx-cu12", marker = "sys_platform == 'linux'" },
 ]
 
 [[package]]
@@ -357,6 +357,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "loguru" },
     { name = "lvis" },
+    { name = "matplotlib" },
     { name = "pillow" },
     { name = "pycocotools" },
     { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
@@ -384,6 +385,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135.2" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "lvis", git = "https://github.com/lvis-dataset/lvis-api.git" },
+    { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pycocotools", specifier = ">=2.0.11" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.10", index = "https://download.pytorch.org/whl/cu126" },
@@ -1157,7 +1159,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.10.2.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform != 'darwin'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/41/e79269ce215c857c935fd86bcfe91a451a584dfc27f1e068f568b9ad1ab7/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:c9132cc3f8958447b4910a1720036d9eff5928cc3179b0a51fb6d167c6cc87d8", size = 705026878, upload-time = "2025-06-06T21:52:51.348Z" },
@@ -1169,7 +1171,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1f/37/c50d2b2f2c07e146776389e3080f4faf70bcc4fa6e19d65bb54ca174ebc3/nvidia_cufft_cu12-11.3.0.4-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d16079550df460376455cba121db6564089176d9bac9e4f360493ca4741b22a6", size = 200164144, upload-time = "2024-11-20T17:40:58.288Z" },
@@ -1203,9 +1205,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform != 'darwin'" },
-    { name = "nvidia-cusparse-cu12", marker = "sys_platform != 'darwin'" },
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "nvidia-cusparse-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/93/17/dbe1aa865e4fdc7b6d4d0dd308fdd5aaab60f939abfc0ea1954eac4fb113/nvidia_cusolver_cu12-11.7.1.2-py3-none-manylinux2014_aarch64.whl", hash = "sha256:0ce237ef60acde1efc457335a2ddadfd7610b892d94efee7b776c64bb1cac9e0", size = 157833628, upload-time = "2024-10-01T17:05:05.591Z" },
@@ -1219,7 +1221,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/eb/6681efd0aa7df96b4f8067b3ce7246833dd36830bb4cec8896182773db7d/nvidia_cusparse_cu12-12.5.4.2-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:d25b62fb18751758fe3c93a4a08eff08effedfe4edf1c6bb5afd0890fe88f887", size = 216451147, upload-time = "2024-11-20T17:44:18.055Z" },
@@ -2115,19 +2117,19 @@ dependencies = [
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:b9422be894e6969bcd33f20e0a1599c5e7d43b39ef548f35d3f83557053fd1a4" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:a127341237ec2e70a54d031d2bae7be395f5d24c5a7c3e8b8b03cdd1fcebcb53" },
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp312-cp312-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp312-cp312-win_amd64.whl", hash = "sha256:10cc643e8c01634728e4f96b725a6096ea8cec423f2b8ba234ad139947b2ae17" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:e2b05253a352b32cd8bb0a5d4ffa4d2c479b011c235bb73fefb052b1c18ac87f" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:9d155c55b6f3516b60de24e32f194f79607d0ab9c6df6ba89ca20e181a352ca2" },
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313-win_amd64.whl", hash = "sha256:67f460b5cf6d8b6ede4cdca0c73987e51a00da434a4f5fa6aa325a264e7926f6" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:e5b7d96484a12491cb3f293464efa516154ccf9832862f32b601bb1a93645221" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:c22b31747f764ebb6d943f488f43a4de1d7ee4084ab0b945a6ca30d14407f9e8" },
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313t-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp313-cp313t-win_amd64.whl", hash = "sha256:bc331411de5b686012cdbf347169abc3973a6bdc333078a4c89c62431202d6a5" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:5730139e4d03e2121559a1f45625b14d149f1b7ce080fca824da7f9d2b6c7fc5" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:45b1aa89b7dd1110881675dbbe7e2409789b29494c495b004860570273aa5c73" },
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314-win_amd64.whl", hash = "sha256:4ff60e8041277de2f6c1b13d226063878650898afac7f72281af03158da70a3f" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:027ccbec15df76818557b6e0ae5afdb2cc8e389094e5ada19f75878e7def4aff" },
     { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:40cfd2c75ff3994b50c70f93220a6b5f2e77eb2acd08b4ad8340cebff89aeba2" },
-    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314t-win_amd64.whl" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.26.0%2Bcu126-cp314-cp314t-win_amd64.whl", hash = "sha256:56ebdb391066abcb28d748f8b0c67581a8cb03d2359d0cf3e86832e03c4fb1ee" },
 ]
 
 [[package]]

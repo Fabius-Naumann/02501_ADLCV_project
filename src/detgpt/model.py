@@ -160,7 +160,7 @@ class QwenVLMHandler:
     """Wrapper for prompt-based object localization with Qwen VLMs."""
 
     _REFERENCE_COORD_MAX = 1000.0
-    _SYSTEM_PROMPT = (
+    _SYSTEM_PROMPT_OBJECT_DETECTION = (
         "You are a helpful assistant to detect objects in images. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
         'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
@@ -170,8 +170,15 @@ class QwenVLMHandler:
         "If no object is present, return []. "
         "Do not include markdown, comments, or any extra text."
     )
+    _SYSTEM_PROMPT_VISUAL_DESCRIPTION = (
+        "You are a helpful assistant for visual attribute extraction from support examples. "
+        "You will be shown one or more support images where the relevant objects are highlighted with red boxes. "
+        "Describe the boxed objects using concise, visually distinguishing traits only. "
+        "Focus on appearance, shape, parts, texture and material that help someone find the same or similar "
+        "object in another image. Do not describe the whole image. Do not mention coordinates or the red box."
+    )
 
-    def __init__(self, model_id: str = "Qwen/Qwen2-VL-2B-Instruct") -> None:
+    def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
         """Initialize model and processor.
 
         Args:
@@ -215,6 +222,30 @@ class QwenVLMHandler:
         return (
             f"Detect objects of class '{category_name}' in this image. "
             f"Set each detection 'label' field to '{category_name}'. "
+            f"Return at most {max_detections} detection(s). "
+            "Prefer high precision over high recall."
+        )
+
+    def _build_description_prompt(self, category_name: str) -> str:
+        """Build a prompt that asks for a support-conditioned visual description."""
+        return (
+            f"The red box shows an example of '{category_name}'. "
+            "Write a short description of the boxed object using only visually distinguishing traits. "
+            "Keep it to one or two sentences. Mention appearance, shape, material, parts, and local context if useful. "
+            "Do not mention the class name unless it is necessary to avoid ambiguity."
+        )
+
+    def _build_description_detection_prompt(
+        self,
+        description: str,
+        output_label: str,
+        max_detections: int,
+    ) -> str:
+        """Build a detection prompt from a generated support description."""
+        return (
+            "Detect objects in this image that match the following support-derived description: "
+            f"{description.strip()} "
+            f"Set each detection 'label' field to '{output_label}'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
         )
@@ -328,14 +359,22 @@ class QwenVLMHandler:
             "parsed_output": {"detections": []},
         }
 
-    def _generate_text(self, image_pil: Image.Image, prompt: str, max_new_tokens: int, temperature: float) -> str:
+    def _generate_text(
+        self,
+        image_pil: Image.Image,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        system_prompt: str | None = None,
+    ) -> str:
         """Run one image-text generation step with chat-template fallback."""
+        resolved_system_prompt = system_prompt or self._SYSTEM_PROMPT_OBJECT_DETECTION
         used_chat_template = False
         try:
             messages = [
                 {
                     "role": "system",
-                    "content": self._SYSTEM_PROMPT,
+                    "content": resolved_system_prompt,
                 },
                 {
                     "role": "user",
@@ -353,7 +392,7 @@ class QwenVLMHandler:
             inputs = self.processor(text=[text_prompt], images=[image_pil], return_tensors="pt")
             used_chat_template = True
         except (AttributeError, TypeError, ValueError):
-            fallback_prompt = f"{self._SYSTEM_PROMPT}\n\n{prompt}"
+            fallback_prompt = f"{resolved_system_prompt}\n\n{prompt}"
             inputs = self.processor(images=image_pil, text=fallback_prompt, return_tensors="pt")
 
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
@@ -378,6 +417,14 @@ class QwenVLMHandler:
             clean_up_tokenization_spaces=False,
         )[0]
         return generated_text.strip()
+
+    @staticmethod
+    def _normalize_description(description: str) -> str:
+        """Normalize a generated support description for reuse as detector text."""
+        description_text = " ".join(description.strip().split())
+        if not description_text:
+            raise ValueError("Generated description is empty.")
+        return description_text
 
     def _extract_category_detections(
         self,
@@ -517,6 +564,81 @@ class QwenVLMHandler:
         }
         if return_debug_outputs:
             outputs["debug_entries"] = debug_entries
+
+        return outputs
+
+    def generate_support_description(
+        self,
+        support_image: Image.Image,
+        category_name: str,
+        max_new_tokens: int = 128,
+        temperature: float = 0.0,
+    ) -> str:
+        """Generate a concise visual description from a support example image."""
+        raw_description = self._generate_text(
+            image_pil=support_image,
+            prompt=self._build_description_prompt(category_name=category_name),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            system_prompt=self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
+        )
+        return self._normalize_description(raw_description)
+
+    def predict_from_description(
+        self,
+        image_tensor: Tensor,
+        description: str,
+        output_label: str,
+        max_detections: int = 1,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        return_debug_outputs: bool = False,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
+        """Run prompt-based localization using a free-text support description."""
+        normalized_description = self._normalize_description(description)
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+        image_width, image_height = image_pil.size
+
+        prompt = self._build_description_detection_prompt(
+            description=normalized_description,
+            output_label=output_label,
+            max_detections=max_detections,
+        )
+        generated_text = self._generate_text(
+            image_pil=image_pil,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+        parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+        boxes, scores, labels = self._extract_category_detections(
+            detections=parsed_detections,
+            category_name=output_label,
+            image_width=image_width,
+            image_height=image_height,
+            max_detections_per_category=max_detections,
+        )
+
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
+            "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
+            "labels": labels,
+        }
+        if return_debug_outputs:
+            outputs["debug_entries"] = [
+                {
+                    "description": normalized_description,
+                    "input_prompt": prompt,
+                    "raw_output_text": generated_text,
+                    "parsed_output": parse_metadata,
+                    "final_output": {
+                        "boxes_cxcywh": boxes,
+                        "scores": scores,
+                        "labels": labels,
+                    },
+                }
+            ]
 
         return outputs
 
