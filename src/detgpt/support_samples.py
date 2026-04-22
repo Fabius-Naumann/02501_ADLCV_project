@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from numpy import spacing
 import torch
 from PIL import Image
 from torch import Tensor
@@ -23,7 +22,9 @@ def _to_uint8_image(image: Tensor) -> Tensor:
     return image_cpu.to(dtype=torch.uint8)
 
 
-def _render_support_image(image: Tensor, target: dict[str, Any], category_name: str | None = None, type: str | None = "box") -> Tensor:
+def _render_support_image(
+    image: Tensor, target: dict[str, Any], category_name: str | None = None, type: str | None = "box"
+) -> Tensor:
     """Render support image with annotation boxes for one target class only."""
     image_u8 = _to_uint8_image(image)
     boxes_any = target.get("boxes")
@@ -57,7 +58,7 @@ def _render_support_image(image: Tensor, target: dict[str, Any], category_name: 
             colors="red",
             width=3,
         )
-    elif type == "mark":
+    if type == "mark":
         # Mark the center of the boxes instead of drawing full boxes.
         centers = (boxes_xyxy[:, :2] + boxes_xyxy[:, 2:]) // 2
         marked_image = image_u8.clone()
@@ -70,8 +71,7 @@ def _render_support_image(image: Tensor, target: dict[str, Any], category_name: 
             bottom = min(image_u8.shape[1], y + radius)
             marked_image[:, top:bottom, left:right] = torch.tensor([255, 0, 0], dtype=torch.uint8).view(3, 1, 1)
         return marked_image
-    else:
-        raise ValueError(f"Unsupported type '{type}'. Use 'box' or 'mark'.")
+    raise ValueError(f"Unsupported type '{type}'. Use 'box' or 'mark'.")
 
 
 def _resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
@@ -184,7 +184,7 @@ def cropped_side_by_side(
 
         cropped_image = image[:, y_min:y_max, x_min:x_max]
         cropped_supports.append((cropped_image, target))
-    
+
     return side_by_side(
         target_img=target_img,
         n_support_img=cropped_supports,
@@ -193,6 +193,7 @@ def cropped_side_by_side(
         spacing=spacing,
         type=type,
     )
+
 
 def marked_side_by_side(
     target_img: Tensor,
@@ -220,7 +221,7 @@ def marked_side_by_side(
     for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
         marked_image = _render_support_image(image, target, category_name=support_category_name, type=type)
         marked_supports.append((marked_image, target))
-    
+
     return side_by_side(
         target_img=target_img,
         n_support_img=marked_supports,
@@ -229,6 +230,7 @@ def marked_side_by_side(
         spacing=spacing,
         type=type,
     )
+
 
 def _find_support_indices(
     dataset: Task1DetectionDataset,
@@ -289,7 +291,7 @@ if __name__ == "__main__":
     print(f"Query index: {query_index}")
     print(f"Support indices: {support_indices}")
     print(f"Saved combined image to: {FIGURES_DIR / 'support_query_side_by_side.png'}")
-    
+
     combined_cropped = cropped_side_by_side(
         target_img=query_img,
         n_support_img=support_samples,
