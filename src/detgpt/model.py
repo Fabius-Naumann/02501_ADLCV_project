@@ -172,7 +172,7 @@ class QwenVLMHandler:
     )
     _SYSTEM_PROMPT_VISUAL_DESCRIPTION = (
         "You are a helpful assistant for visual attribute extraction from support examples. "
-        "You will be shown a support image(s) where the relevant object is highlighted with a red box. "
+        "You will be shown one or more support images where the relevant object is highlighted with a red box. "
         "Describe the boxed object using concise, visually distinguishing traits only. "
         "Focus on appearance, shape, parts, texture, material, and local context that help someone find the same "
         "object in another image. Do not describe the whole image. Do not mention coordinates or the red box."
