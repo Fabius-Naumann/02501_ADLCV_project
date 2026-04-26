@@ -41,55 +41,50 @@ class GroundingDINOHandler:
         category_names: list[str],
         threshold: float = 0.3,
     ) -> dict[str, Tensor | list[str]]:
-        """
-        Run inference on a single image tensor.
-
-        Args:
-            image_tensor: C x H x W tensor from Task1DetectionDataset.
-            category_names: List of labels to find (e.g., ["cat", "dog"]).
-            threshold: Confidence threshold for detections.
-
-        Returns:
-            Dictionary with:
-                - boxes: Tensor[N, 4] in xyxy pixel coordinates
-                - scores: Tensor[N]
-                - labels: list[str] of length N
-        """
-        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
-        unique_category_names = list(dict.fromkeys(cleaned_category_names))
-        text_prompt = ". ".join(unique_category_names) + "."
+        all_boxes = []
+        all_scores = []
+        all_labels = []
 
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
 
-        inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+        cleaned_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
 
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        for category_name in cleaned_category_names:
+            text_prompt = category_name.replace("_", " ") + "."
 
-        result = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=threshold,
-            text_threshold=threshold,
-            target_sizes=[image_pil.size[::-1]],
-        )[0]
+            inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
 
-        boxes = result["boxes"]
-        scores = result["scores"]
+            with torch.no_grad():
+                outputs = self.model(**inputs)
 
-        raw_labels = result["text_labels"] if "text_labels" in result else result["labels"]
-        labels = [str(label) for label in raw_labels]
+            result = self.processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=threshold,
+                text_threshold=threshold,
+                target_sizes=[image_pil.size[::-1]],
+            )[0]
 
-        count = min(len(boxes), len(scores), len(labels))
-        boxes = boxes[:count]
-        scores = scores[:count]
-        labels = labels[:count]
+            boxes = result["boxes"].detach().cpu().to(torch.float32)
+            scores = result["scores"].detach().cpu().to(torch.float32)
+
+            for box, score in zip(boxes, scores, strict=True):
+                all_boxes.append(box)
+                all_scores.append(score)
+                all_labels.append(category_name)
+
+        if all_boxes:
+            boxes_tensor = torch.stack(all_boxes).to(torch.float32)
+            scores_tensor = torch.stack(all_scores).to(torch.float32)
+        else:
+            boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
+            scores_tensor = torch.empty((0,), dtype=torch.float32)
 
         return {
-            "boxes": boxes,
-            "scores": scores,
-            "labels": labels,
+            "boxes": boxes_tensor,
+            "scores": scores_tensor,
+            "labels": all_labels,
         }
 
 
