@@ -92,6 +92,45 @@ class GroundingDINOHandler:
             "labels": labels,
         }
 
+    def predict_candidates(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        box_threshold: float = 0.1,  # Lower for Task 3
+        text_threshold: float = 0.1, # Lower for Task 3
+    ) -> dict[str, Tensor | list[str]]:
+        """
+        High-recall candidate generation for Task 3 Fusion.
+        Returns as many boxes as possible for later verification.
+        """
+        # Reuse existing prompt logic
+        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
+        unique_category_names = list(dict.fromkeys(cleaned_category_names))
+        text_prompt = ". ".join(unique_category_names) + "."
+
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
+        inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        # Using much lower thresholds for the post-processor
+        result = self.processor.post_process_grounded_object_detection(
+            outputs,
+            inputs.input_ids,
+            threshold=box_threshold,
+            text_threshold=text_threshold,
+            target_sizes=[image_pil.size[::-1]],
+        )[0]
+
+        return {
+            "boxes": result["boxes"],   # xyxy format
+            "scores": result["scores"],
+            "labels": [str(label) for label in result.get("text_labels", result.get("labels", []))],
+        }
+
 
 class YOLOWorldHandler:
     """Wrapper for YOLO-World zero-shot object detection."""
