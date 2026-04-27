@@ -14,11 +14,16 @@ from loguru import logger
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from detgpt import OUTPUTS_DIR, RAW_DIR
+from detgpt import OUTPUTS_DIR
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
-from detgpt.support_samples import cropped_side_by_side, find_support_indices, marked_side_by_side, side_by_side
+from detgpt.support_samples import (
+    cropped_side_by_side,
+    find_support_indices,
+    marked_side_by_side,
+    side_by_side,
+)
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
@@ -275,33 +280,6 @@ def _save_qwen_debug_dump(
     logger.info("Saved Qwen debug dump to {}", debug_path)
 
 
-def _load_novel_categories(split: str, frequency_code: str = "r") -> set[str]:
-    """Load category names from LVIS metadata marked with the requested frequency code."""
-    annotation_path = RAW_DIR / f"lvis_v1_{split}.json"
-    if not annotation_path.is_file():
-        raise FileNotFoundError(
-            f"Missing LVIS annotation file: {annotation_path}. Run the dataset preparation first."
-        )
-
-    with annotation_path.open("r", encoding="utf-8") as file_handle:
-        lvis_payload = json.load(file_handle)
-
-    categories = lvis_payload.get("categories", [])
-    normalized_frequency = frequency_code.strip().lower()
-    if normalized_frequency not in {"r", "c", "f"}:
-        raise typer.BadParameter("Unsupported novel frequency code. Use one of: r, c, f.")
-
-    category_names: set[str] = set()
-    for category in categories:
-        if str(category.get("frequency", "")).strip().lower() != normalized_frequency:
-            continue
-        category_name = str(category.get("name", "")).strip()
-        if category_name:
-            category_names.add(category_name)
-
-    return category_names
-
-
 def _ground_truth_record_for_category(
     image_path: str,
     target: dict[str, Any],
@@ -427,37 +405,21 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     query_split: str = typer.Option("val", help="Query split to evaluate: val or train."),
     support_split: str = typer.Option("train", help="Support split for 1-shot/5-shot examples: val or train."),
     limit: int = typer.Option(20, help="Number of query images to evaluate."),
-    max_novel_categories_per_image: int = typer.Option(
-        0,
-        help="Max novel categories evaluated per image. Use 0 to evaluate all novel categories in each image.",
-    ),
-    novel_frequency_code: str = typer.Option(
-        "r",
-        help="LVIS category frequency code used as novel-class filter: r, c, or f.",
-    ),
-    dino_model_id: str = typer.Option(
-        DINO_DEFAULT_MODEL_ID,
-        help="Grounding DINO model id for zero-shot text baseline.",
+    category_names: str = typer.Option(
+        ...,
+        help="Comma-separated category names to evaluate (required).",
     ),
     qwen_model_id: str = typer.Option(
         QWEN_DEFAULT_MODEL_ID,
-        help="Qwen model id for zero-shot and support-conditioned VLM baselines.",
+        help="Qwen model id for support-conditioned VLM detection.",
     ),
     qwen_max_detections_per_category: int = typer.Option(
         1,
         help="Maximum detections per category for Qwen methods.",
     ),
-    description_max_new_tokens: int = typer.Option(
-        128,
-        help="Maximum generated tokens for support description generation.",
-    ),
     localization_max_new_tokens: int = typer.Option(
         256,
         help="Maximum generated tokens for Qwen localization generation.",
-    ),
-    dino_threshold: float = typer.Option(
-        0.3,
-        help="Grounding DINO confidence/text threshold.",
     ),
     qwen_temperature: float = typer.Option(
         0.0,
@@ -469,7 +431,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         help="Save Task 2 metrics and CSV summary.",
     ),
 ) -> dict[str, Any]:
-    """Evaluate support-presentation strategies and zero-shot baselines for novel classes."""
+    """Evaluate support-presentation strategies for selected classes."""
     normalized_query_split = query_split.strip().lower()
     normalized_support_split = support_split.strip().lower()
     if normalized_query_split not in {"val", "train"}:
@@ -478,34 +440,33 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         raise typer.BadParameter("Unsupported support split. Use 'val' or 'train'.")
     if limit < 1:
         raise typer.BadParameter("--limit must be at least 1.")
-    if max_novel_categories_per_image < 0:
-        raise typer.BadParameter("--max-novel-categories-per-image must be >= 0.")
+
+    requested_categories = _extract_query_categories(category_names.split(","))
+    if not requested_categories:
+        raise typer.BadParameter("--category-names must include at least one non-empty category name.")
+    requested_category_set = {name.casefold() for name in requested_categories}
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / "task2_results" / f"run_{timestamp}"
+    viz_dir = run_dir / "visualizations"
     if save_results:
         run_dir.mkdir(parents=True, exist_ok=True)
-
-    novel_categories = _load_novel_categories(
-        split=normalized_query_split,
-        frequency_code=novel_frequency_code,
-    )
-    if not novel_categories:
-        raise ValueError("No novel categories were resolved from LVIS metadata.")
+        viz_dir.mkdir(parents=True, exist_ok=True)
 
     query_dataset = Task1DetectionDataset(split=normalized_query_split, to_float=True)
     support_dataset = Task1DetectionDataset(split=normalized_support_split, to_float=True)
     query_loader = DataLoader(query_dataset, batch_size=1, collate_fn=task1_collate_fn)
 
-    dino_handler = GroundingDINOHandler(model_id=dino_model_id)
     qwen_handler = QwenVLMHandler(model_id=qwen_model_id)
+    qwen_task2_detection_system_prompt = qwen_handler._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT
 
+    # Map strategy names to their panel builder functions (target_img=None for support panel only)
     strategy_builders = {
         "side_by_side": side_by_side,
         "cropped_exemplars": cropped_side_by_side,
         "set_of_mark_visual": marked_side_by_side,
     }
-    shots = [1, 5]
+    shots = [1, 3, 5]
     max_requested_support = max(shots)
 
     method_predictions: dict[str, list[dict[str, Any]]] = {}
@@ -533,10 +494,8 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         query_categories = [
             category_name
             for category_name in _extract_query_categories(query_target["category_names"])
-            if category_name in novel_categories
+            if category_name.casefold() in requested_category_set
         ]
-        if max_novel_categories_per_image > 0:
-            query_categories = query_categories[:max_novel_categories_per_image]
 
         for category_name in query_categories:
             image_key = f"{image_path}::query={query_index}::category={category_name}"
@@ -550,35 +509,6 @@ def run_task2_support_strategy_baseline(  # noqa: C901
 
             total_category_pairs += 1
 
-            dino_detections = dino_handler.predict(
-                image_tensor=query_image,
-                category_names=[category_name],
-                threshold=dino_threshold,
-            )
-            _append_eval(
-                method_name="grounding_dino_zero_shot",
-                gt_record=gt_record,
-                pred_record=_prediction_record(
-                    image_path=image_key,
-                    backend="grounding_dino",
-                    detections=dino_detections,
-                ),
-            )
-
-            qwen_zero_shot = qwen_handler.predict(
-                image_tensor=query_image,
-                category_names=[category_name],
-                max_detections_per_category=qwen_max_detections_per_category,
-                max_new_tokens=localization_max_new_tokens,
-                temperature=qwen_temperature,
-                return_debug_outputs=False,
-            )
-            _append_eval(
-                method_name="qwen_vlm_zero_shot",
-                gt_record=gt_record,
-                pred_record=_prediction_record(image_path=image_key, backend="qwen_vlm", detections=qwen_zero_shot),
-            )
-
             support_query_index = query_index if normalized_support_split == normalized_query_split else -1
             support_indices = find_support_indices(
                 dataset=support_dataset,
@@ -587,12 +517,16 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                 n_support=max_requested_support,
             )
 
+            query_height = int(query_image.shape[1])
+            query_width = int(query_image.shape[2])
+
             for shot in shots:
                 if len(support_indices) < shot:
                     continue
 
                 support_samples = [support_dataset[support_index] for support_index in support_indices[:shot]]
                 for strategy_name, strategy_builder in strategy_builders.items():
+                    # Build support panel without query image (target_img=None)
                     support_panel = strategy_builder(
                         target_img=None,
                         n_support_img=support_samples,
@@ -600,24 +534,20 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                     )
 
                     if not isinstance(support_panel, Image.Image):
-                        raise TypeError(
-                            f"Support strategy '{strategy_name}' did not return a PIL.Image instance."
-                        )
+                        raise TypeError(f"Support strategy '{strategy_name}' did not return a PIL.Image instance.")
 
-                    generated_description = qwen_handler.generate_support_description(
-                        support_image=support_panel,
+                    # Run prediction with support panel and query image
+                    support_detections = qwen_handler.predict_with_support_panel(
+                        query_image_tensor=query_image,
+                        support_panel_pil=support_panel,
                         category_name=category_name,
-                        max_new_tokens=description_max_new_tokens,
-                        temperature=qwen_temperature,
-                    )
-                    support_detections = qwen_handler.predict_from_description(
-                        image_tensor=query_image,
-                        description=generated_description,
-                        output_label=category_name,
+                        query_image_width=query_width,
+                        query_image_height=query_height,
                         max_detections=qwen_max_detections_per_category,
                         max_new_tokens=localization_max_new_tokens,
                         temperature=qwen_temperature,
                         return_debug_outputs=False,
+                        system_prompt=qwen_task2_detection_system_prompt,
                     )
 
                     _append_eval(
@@ -629,6 +559,33 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                             detections=support_detections,
                         ),
                     )
+
+                    if save_results:
+                        # Save support panel
+                        support_panel_path = (
+                            viz_dir
+                            / f"q{query_index:04d}_c{category_name}_{strategy_name}_{shot}shot_support_panel.png"
+                        )
+                        support_panel.save(support_panel_path)
+
+                        # Save query image
+                        query_image_path = (
+                            viz_dir / f"q{query_index:04d}_c{category_name}_{strategy_name}_{shot}shot_query.png"
+                        )
+                        query_image_pil = Image.fromarray(
+                            (query_image.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy() * 255).astype("uint8")
+                        )
+                        query_image_pil.save(query_image_path)
+
+                        query_detections_viz_path = (
+                            viz_dir / f"q{query_index:04d}_c{category_name}_{strategy_name}_{shot}shot_detections.png"
+                        )
+                        _save_visualization(
+                            image_tensor=query_image,
+                            detections=support_detections,
+                            backend="qwen_vlm",
+                            output_path=query_detections_viz_path,
+                        )
 
     metrics_by_method: dict[str, Any] = {}
     method_rows: list[dict[str, Any]] = []
@@ -655,7 +612,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         "query_split": normalized_query_split,
         "support_split": normalized_support_split,
         "limit": limit,
-        "novel_frequency_code": novel_frequency_code,
+        "requested_categories": requested_categories,
         "evaluated_query_images": total_query_images,
         "evaluated_category_pairs": total_category_pairs,
         "methods": metrics_by_method,
@@ -808,4 +765,5 @@ def run_task1_baseline(
 
 
 if __name__ == "__main__":
-    typer.run(run_task1_baseline)
+    # typer.run(run_task1_baseline)
+    typer.run(run_task2_support_strategy_baseline)

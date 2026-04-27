@@ -177,6 +177,20 @@ class QwenVLMHandler:
         "Focus on appearance, shape, parts, texture and material that help someone find the same or similar "
         "object in another image. Do not describe the whole image. Do not mention coordinates or the red box."
     )
+    _TASK2_OBJECT_DETECTION_SYSTEM_PROMPT = (
+        "You are a helpful assistant to detect objects in images in a few-shot setting. "
+        "You will be provided with support example images where the relevant objects are highlighted. "
+        "Use these examples to understand what the target object looks like, then apply this knowledge "
+        "to detect similar objects in the query image. "
+        "When asked to detect elements based on a description, return ONLY valid JSON. "
+        'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
+        '"score": 0.0}]. '
+        "Coordinates must be integers scaled to a fixed 1000x1000 reference frame, where each value is in [0, 1000]. "
+        "Do not output absolute image pixel coordinates. Enforce xmin < xmax and ymin < ymax. "
+        "If no object is present, return []. "
+        "Do not include markdown, comments, or any extra text."
+    )
+
 
     def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
         """Initialize model and processor.
@@ -246,6 +260,17 @@ class QwenVLMHandler:
             "Detect objects in this image that match the following support-derived description: "
             f"{description.strip()} "
             f"Set each detection 'label' field to '{output_label}'. "
+            f"Return at most {max_detections} detection(s). "
+            "Prefer high precision over high recall."
+        )
+
+    def _build_task2_support_conditioned_prompt(self, category_name: str, max_detections: int) -> str:
+        """Build a direct few-shot detection prompt using support and query in one panel."""
+        return (
+            "You are provided with a support-image and a query image."
+            f"The support image contains one or more examples of the target object class '{category_name}'. "
+            f"Detect objects of class '{category_name}' only in the query image on the right. "
+            f"Set each detection label to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
         )
@@ -483,6 +508,7 @@ class QwenVLMHandler:
         max_new_tokens: int = 256,
         temperature: float = 0.0,
         return_debug_outputs: bool = False,
+        system_prompt: str | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Run prompt-based localization for a list of categories.
 
@@ -493,6 +519,7 @@ class QwenVLMHandler:
             max_new_tokens: Generation length limit.
             temperature: Decoding temperature.
             return_debug_outputs: Include per-category input/raw/parsed/final debug payload.
+            system_prompt: Optional override for the detection system prompt.
 
         Returns:
             Dictionary with keys: boxes (cxcywh), scores, labels.
@@ -520,6 +547,7 @@ class QwenVLMHandler:
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
+                system_prompt=system_prompt,
             )
             parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
 
@@ -573,6 +601,7 @@ class QwenVLMHandler:
         category_name: str,
         max_new_tokens: int = 128,
         temperature: float = 0.0,
+        system_prompt: str | None = None,
     ) -> str:
         """Generate a concise visual description from a support example image."""
         raw_description = self._generate_text(
@@ -580,7 +609,7 @@ class QwenVLMHandler:
             prompt=self._build_description_prompt(category_name=category_name),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
+            system_prompt=system_prompt or self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
         )
         return self._normalize_description(raw_description)
 
@@ -593,6 +622,7 @@ class QwenVLMHandler:
         max_new_tokens: int = 256,
         temperature: float = 0.0,
         return_debug_outputs: bool = False,
+        system_prompt: str | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Run prompt-based localization using a free-text support description."""
         normalized_description = self._normalize_description(description)
@@ -610,6 +640,7 @@ class QwenVLMHandler:
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
+            system_prompt=system_prompt,
         )
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
         boxes, scores, labels = self._extract_category_detections(
@@ -640,6 +671,330 @@ class QwenVLMHandler:
                 }
             ]
 
+        return outputs
+
+    def predict_with_support_query_panel(
+        self,
+        support_query_panel: Image.Image,
+        category_name: str,
+        query_image_width: int,
+        query_image_height: int,
+        max_detections: int = 1,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        return_debug_outputs: bool = False,
+        system_prompt: str | None = None,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
+        """Detect query objects directly from a support-query panel without text-from-vision."""
+        normalized_category_name = category_name.strip()
+        if not normalized_category_name:
+            raise ValueError("category_name must be non-empty.")
+
+        prompt = self._build_task2_support_conditioned_prompt(
+            category_name=normalized_category_name,
+            max_detections=max_detections,
+        )
+        generated_text = self._generate_text(
+            image_pil=support_query_panel,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+        )
+        parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+        boxes, scores, labels = self._extract_category_detections(
+            detections=parsed_detections,
+            category_name=normalized_category_name,
+            image_width=query_image_width,
+            image_height=query_image_height,
+            max_detections_per_category=max_detections,
+        )
+
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
+            "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
+            "labels": labels,
+        }
+        if return_debug_outputs:
+            outputs["debug_entries"] = [
+                {
+                    "category_name": normalized_category_name,
+                    "input_prompt": prompt,
+                    "raw_output_text": generated_text,
+                    "parsed_output": parse_metadata,
+                    "final_output": {
+                        "boxes_cxcywh": boxes,
+                        "scores": scores,
+                        "labels": labels,
+                    },
+                }
+            ]
+
+        return outputs
+
+    def predict_with_support_panel(
+        self,
+        query_image_tensor: Tensor,
+        support_panel_pil: Image.Image,
+        category_name: str,
+        query_image_width: int,
+        query_image_height: int,
+        max_detections: int = 1,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        return_debug_outputs: bool = False,
+        system_prompt: str | None = None,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
+        """Detect query objects using a support panel and separate query image.
+        
+        Args:
+            query_image_tensor: Query image tensor (C x H x W) in [0, 1].
+            support_panel_pil: PIL.Image with all support examples combined into one panel.
+            category_name: Target object category name.
+            query_image_width: Width of query image in pixels.
+            query_image_height: Height of query image in pixels.
+            max_detections: Maximum detections per category.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Generation temperature.
+            return_debug_outputs: Whether to return debug information.
+            system_prompt: Optional system prompt override.
+            
+        Returns:
+            Dictionary with boxes (cxcywh), scores, and labels.
+        """
+        normalized_category_name = category_name.strip()
+        if not normalized_category_name:
+            raise ValueError("category_name must be non-empty.")
+        
+        # Convert query tensor to PIL
+        query_image_np = query_image_tensor.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
+        query_image_pil = Image.fromarray((query_image_np * 255).astype("uint8"))
+        
+        # Build the prompt
+        prompt = self._build_task2_support_conditioned_prompt(
+            category_name=normalized_category_name,
+            max_detections=max_detections,
+        )
+        
+        # Combine support panel and query image side by side
+        support_height = support_panel_pil.height
+        support_width = support_panel_pil.width
+        query_resized = query_image_pil.copy()
+        if query_resized.height != support_height:
+            new_width = max(1, round(query_resized.width * (support_height / query_resized.height)))
+            query_resized = query_resized.resize((new_width, support_height), Image.Resampling.BILINEAR)
+        
+        query_offset_x = support_width + 8
+        query_resized_width = query_resized.width
+        combined_width = support_width + query_resized_width + 8
+        combined_height = support_height
+        combined_canvas = Image.new("RGB", (combined_width, combined_height), color=(255, 255, 255))
+        combined_canvas.paste(support_panel_pil, (0, 0))
+        combined_canvas.paste(query_resized, (query_offset_x, 0))
+        
+        # Generate detections
+        generated_text = self._generate_text(
+            image_pil=combined_canvas,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+        )
+        
+        # Parse output
+        parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+        
+        # Adjust detections from combined image coordinates to query-only coordinates
+        adjusted_detections = []
+        reference_max = self._REFERENCE_COORD_MAX
+        for detection in parsed_detections:
+            if not isinstance(detection, dict):
+                continue
+            box = detection.get("bbox_xyxy")
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+            try:
+                x1, y1, x2, y2 = [float(value) for value in box]
+            except (TypeError, ValueError):
+                continue
+            
+            # Convert from 0-1000 reference frame to pixel coordinates in combined image
+            combined_x1 = x1 * combined_width / reference_max
+            combined_y1 = y1 * combined_height / reference_max
+            combined_x2 = x2 * combined_width / reference_max
+            combined_y2 = y2 * combined_height / reference_max
+            
+            # Subtract query offset to get coordinates relative to query image
+            query_x1 = combined_x1 - query_offset_x
+            query_y1 = combined_y1
+            query_x2 = combined_x2 - query_offset_x
+            query_y2 = combined_y2
+            
+            # Clip to valid query image bounds (accounting for resizing)
+            query_x1 = max(0.0, min(query_x1, query_resized_width))
+            query_y1 = max(0.0, min(query_y1, support_height))
+            query_x2 = max(0.0, min(query_x2, query_resized_width))
+            query_y2 = max(0.0, min(query_y2, support_height))
+            
+            # Skip if box is invalid after clipping
+            if query_x2 <= query_x1 or query_y2 <= query_y1:
+                continue
+            
+            # Convert back to 0-1000 reference frame relative to original query image
+            # First scale from resized query image to original query image
+            scale_x = query_image_width / query_resized_width if query_resized_width > 0 else 1.0
+            scale_y = query_image_height / support_height
+            
+            adjusted_x1 = (query_x1 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x1
+            adjusted_y1 = (query_y1 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y1
+            adjusted_x2 = (query_x2 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x2
+            adjusted_y2 = (query_y2 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y2
+            
+            adjusted_detection = detection.copy()
+            adjusted_detection["bbox_xyxy"] = [adjusted_x1, adjusted_y1, adjusted_x2, adjusted_y2]
+            adjusted_detections.append(adjusted_detection)
+        
+        boxes, scores, labels = self._extract_category_detections(
+            detections=adjusted_detections,
+            category_name=normalized_category_name,
+            image_width=query_image_width,
+            image_height=query_image_height,
+            max_detections_per_category=max_detections,
+        )
+        
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
+            "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
+            "labels": labels,
+        }
+        if return_debug_outputs:
+            outputs["debug_entries"] = [
+                {
+                    "category_name": normalized_category_name,
+                    "input_prompt": prompt,
+                    "raw_output_text": generated_text,
+                    "parsed_output": parse_metadata,
+                    "final_output": {
+                        "boxes_cxcywh": boxes,
+                        "scores": scores,
+                        "labels": labels,
+                    },
+                }
+            ]
+        
+        return outputs
+
+    def predict_with_support_images(
+        self,
+        query_image_tensor: Tensor,
+        support_images_pil: list[Image.Image],
+        category_name: str,
+        query_image_width: int,
+        query_image_height: int,
+        max_detections: int = 1,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        return_debug_outputs: bool = False,
+        system_prompt: str | None = None,
+    ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
+        """Detect query objects using separate support and query images.
+        
+        Args:
+            query_image_tensor: Query image tensor (C x H x W) in [0, 1].
+            support_images_pil: List of support PIL.Images with highlighted objects.
+            category_name: Target object category name.
+            query_image_width: Width of query image in pixels.
+            query_image_height: Height of query image in pixels.
+            max_detections: Maximum detections per category.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Generation temperature.
+            return_debug_outputs: Whether to return debug information.
+            system_prompt: Optional system prompt override.
+            
+        Returns:
+            Dictionary with boxes (cxcywh), scores, and labels.
+        """
+        normalized_category_name = category_name.strip()
+        if not normalized_category_name:
+            raise ValueError("category_name must be non-empty.")
+        
+        # Convert query tensor to PIL
+        query_image_np = query_image_tensor.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
+        query_image_pil = Image.fromarray((query_image_np * 255).astype("uint8"))
+        
+        # Build the prompt
+        prompt = self._build_task2_support_conditioned_prompt(
+            category_name=normalized_category_name,
+            max_detections=max_detections,
+        )
+        
+        # For now, concatenate support images vertically and query image horizontally
+        # Create a combined image with all support examples above and query below
+        if support_images_pil:
+            # Stack support images horizontally
+            support_width = sum(img.width for img in support_images_pil) + 8 * (len(support_images_pil) - 1)
+            support_height = max(img.height for img in support_images_pil)
+            support_canvas = Image.new("RGB", (support_width, support_height), color=(255, 255, 255))
+            x_offset = 0
+            for support_img in support_images_pil:
+                support_canvas.paste(support_img, (x_offset, 0))
+                x_offset += support_img.width + 8
+            
+            # Resize query image to match support height
+            query_resized = query_image_pil.copy()
+            if query_resized.height != support_height:
+                new_width = max(1, round(query_resized.width * (support_height / query_resized.height)))
+                query_resized = query_resized.resize((new_width, support_height), Image.Resampling.BILINEAR)
+            
+            # Combine support and query side by side
+            combined_width = support_canvas.width + query_resized.width + 8
+            combined_height = support_height
+            combined_canvas = Image.new("RGB", (combined_width, combined_height), color=(255, 255, 255))
+            combined_canvas.paste(support_canvas, (0, 0))
+            combined_canvas.paste(query_resized, (support_canvas.width + 8, 0))
+            input_image_pil = combined_canvas
+        else:
+            input_image_pil = query_image_pil
+        
+        # Generate detections
+        generated_text = self._generate_text(
+            image_pil=input_image_pil,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+        )
+        
+        # Parse output
+        parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+        boxes, scores, labels = self._extract_category_detections(
+            detections=parsed_detections,
+            category_name=normalized_category_name,
+            image_width=query_image_width,
+            image_height=query_image_height,
+            max_detections_per_category=max_detections,
+        )
+        
+        outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
+            "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
+            "labels": labels,
+        }
+        if return_debug_outputs:
+            outputs["debug_entries"] = [
+                {
+                    "category_name": normalized_category_name,
+                    "input_prompt": prompt,
+                    "raw_output_text": generated_text,
+                    "parsed_output": parse_metadata,
+                    "final_output": {
+                        "boxes_cxcywh": boxes,
+                        "scores": scores,
+                        "labels": labels,
+                    },
+                }
+            ]
+        
         return outputs
 
 
