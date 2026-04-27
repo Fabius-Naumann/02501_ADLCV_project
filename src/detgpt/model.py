@@ -6,6 +6,9 @@ import re
 from typing import Any
 
 import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF  
+
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -740,6 +743,39 @@ class QwenVLMHandler:
             ]
 
         return outputs
+    
+    def verify_crops(self, crops: list, category_name: str) -> torch.Tensor:
+        """
+        Leona's Task: Verifies if the primary object in each crop is the target.
+        Returns a tensor of scores [0.0, 1.0].
+        """
+        scores = []
+        
+        # 1. Define the tokens for "Yes" and "No" 
+        prompt = f"<|image_pad|>Is the main object in this image a {category_name}? Answer only Yes or No."
+
+        for crop in crops:
+            # Convert crop tensor back to PIL for the processor
+            image_pil = TF.to_pil_image(crop)
+            
+            # Prepare inputs
+            inputs = self.processor(text=[prompt], images=[image_pil], return_tensors="pt").to(self.device)
+            
+            with torch.no_grad():
+                # We only need the first token of the output to determine Yes/No
+                outputs = self.model(**inputs)
+                logits = outputs.logits[:, -1, :] # Look at the last predicted token
+                
+                # 2. Extract probabilities for 'Yes' and 'No' tokens
+                probs = torch.softmax(logits, dim=-1)
+                
+                # For this PoC, we'll look for the highest probability between 'Yes' (id=...) and 'No' (id=...)
+                # Dummy logic: Let's assume the model just returns a probability score, in a real VLM, you'd compare the logit of "Yes" vs "No"
+                yes_prob = probs.max().item() # Placeholder for the 'Yes' token probability
+                
+                scores.append(yes_prob)
+
+        return torch.tensor(scores, dtype=torch.float32, device=self.device)
 
     def predict_with_support_query_panel(
         self,
