@@ -776,6 +776,8 @@ class QwenVLMHandler:
                 binary_probs = torch.softmax(torch.stack([logits[self.yes_token_id], logits[self.no_token_id]]), dim=0)
                 scores.append(binary_probs[0].item())
 
+        if not crops:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
         return torch.tensor(scores, dtype=torch.float32, device=crops[0].device)
 
     def nms_duel(self, crop_a, crop_b, category_name):
@@ -806,8 +808,13 @@ class QwenVLMHandler:
             # Return the winning token
             return "A" if a_score > b_score else "B"
 
-    def generate_support_description(self, support_image, category_name, max_new_tokens=128):
-        # support_image is the PIL collage created by side_by_side
+    def _generate_support_description_from_collage(
+        self,
+        support_image: Image.Image,
+        category_name: str,
+        max_new_tokens: int = 128,
+    ) -> str:
+        """Generate a support description from a side-by-side collage image."""
         prompt = (
             f"<|image_pad|>\nDescribe the visual attributes of the {category_name} in these images. "
             f"Focus on shape, color, texture, and typical context to help an object detector find it."

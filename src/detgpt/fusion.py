@@ -84,6 +84,9 @@ class FusionPipeline:
         candidates = self.dino.predict_candidates(image_tensor, [query], box_threshold=0.15)
 
         k = min(20, len(candidates["boxes"]))
+        if k == 0:
+            logger.info("No candidate boxes found; skipping verification.")
+            return candidates["boxes"], candidates["scores"]
         top_scores, top_idx = torch.topk(candidates["scores"], k)
         boxes_to_verify = candidates["boxes"][top_idx]
         crops = self.extract_crops(image_tensor, boxes_to_verify)
@@ -147,12 +150,16 @@ class FusionPipeline:
         final_boxes = verified_boxes[keep_indices]
         final_scores = verified_scores[keep_indices]
 
+        # Convert keep_indices from verified_boxes space back to boxes_to_verify space
+        verified_to_candidate = verified_mask.nonzero(as_tuple=True)[0]
+        keep_indices_in_candidates = verified_to_candidate[torch.tensor(keep_indices)]
+
         return {
             "boxes": final_boxes,
             "scores": final_scores,
             "count": len(final_boxes),
             "all_boxes": boxes_to_verify,  # Red boxes
-            "keep_indices": keep_indices,  # Green boxes
+            "keep_indices": keep_indices_in_candidates,  # Green boxes (indices into boxes_to_verify)
             "vlm_scores": vlm_scores,
         }
 
