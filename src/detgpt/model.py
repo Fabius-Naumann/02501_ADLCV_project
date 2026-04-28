@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 import torch
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -211,6 +212,52 @@ class GroundingDINOHandler:
             "labels": all_labels,
         }
 
+    def predict_candidates(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        box_threshold: float = 0.1,  # Lower for Task 3
+        text_threshold: float = 0.1,  # Lower for Task 3
+    ) -> dict[str, Tensor | list[str]]:
+        """
+        High-recall candidate generation for Task 3 Fusion.
+        Returns as many boxes as possible for later verification.
+        """
+        # Reuse existing prompt logic
+        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
+        unique_category_names = list(dict.fromkeys(cleaned_category_names))
+        text_prompt = ". ".join(unique_category_names) + "."
+
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
+        inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        # Using much lower thresholds for the post-processor
+        result = self.processor.post_process_grounded_object_detection(
+            outputs,
+            inputs.input_ids,
+            threshold=box_threshold,
+            text_threshold=text_threshold,
+            target_sizes=[image_pil.size[::-1]],
+        )[0]
+
+        boxes = result["boxes"]  # xyxy format
+        scores = result["scores"]
+        labels = [str(label) for label in result.get("text_labels", result.get("labels", []))]
+
+        # Reconcile lengths to avoid downstream mismatches
+        count = min(len(boxes), len(scores), len(labels))
+
+        return {
+            "boxes": boxes[:count],
+            "scores": scores[:count],
+            "labels": labels[:count],
+        }
+
 
 class YOLOWorldHandler:
     """Wrapper for YOLO-World zero-shot object detection."""
@@ -322,8 +369,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_MARKED = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are "
-        "highlighted with red mark on them. "
+        "You will be provided with support example images where the relevant objects "
+        "are highlighted with red mark on them. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -352,19 +399,50 @@ class QwenVLMHandler:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_id,
-            trust_remote_code=True,
-            token=hf_token,
-        )
+        try:
+            self.processor = AutoProcessor.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+                token=hf_token,
+            )
+            dtype = torch.float16 if self.device == "cuda" else torch.float32
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                token=hf_token,
+            ).to(self.device)
 
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            token=hf_token,
-        ).to(self.device)
+            # Token IDs for Task 3.B - validate single-token encoding
+            def _get_single_token_id(*candidates: str) -> int:
+                for candidate in candidates:
+                    token_ids = self.processor.tokenizer.encode(candidate, add_special_tokens=False)
+                    if len(token_ids) == 1:
+                        return token_ids[0]
+                raise ValueError(
+                    f"Tokenizer for model_id='{model_id}' does not encode any of {candidates!r} as a single token."
+                )
+
+            self.yes_token_id = _get_single_token_id(" Yes", "Yes")
+            self.no_token_id = _get_single_token_id(" No", "No")
+            # Token IDs for Task 3.C
+            self.a_token_id = _get_single_token_id(" A", "A")
+            self.b_token_id = _get_single_token_id(" B", "B")
+
+        except OSError as error:
+            alternatives = [
+                "Qwen/Qwen2-VL-2B-Instruct",
+                "Qwen/Qwen2.5-VL-3B-Instruct",
+                "Qwen/Qwen2.5-VL-7B-Instruct",
+                "Qwen/Qwen3.5-2B",
+                "Qwen/Qwen3.5-4B",
+                "Qwen/Qwen3.5-9B",
+            ]
+            raise OSError(
+                f"Failed to load model_id='{model_id}'. This usually means the repo id is invalid or private/gated. "
+                f"Try one of: {alternatives}. If you need a private model, authenticate with `hf auth login` "
+                "or set HF_TOKEN/HUGGINGFACE_HUB_TOKEN."
+            ) from error
 
         self.model.eval()
 

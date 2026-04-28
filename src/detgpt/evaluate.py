@@ -367,6 +367,7 @@ def _ground_truth_record_for_category(
     target: dict[str, Any],
     category_name: str,
 ) -> dict[str, Any]:
+    """Build one category-filtered ground-truth record in cxcywh format."""
     category_boxes = [
         target["boxes"][index].detach().cpu().tolist()
         for index, label in enumerate(target["category_names"])
@@ -385,6 +386,7 @@ def _save_task2_results(
     metrics_by_method: dict[str, Any],
     method_rows: list[dict[str, Any]],
 ) -> None:
+    """Persist Task 2 metrics and summary CSV."""
     metrics_path = run_dir / "task2_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file_handle:
         json.dump(metrics_by_method, file_handle, indent=2)
@@ -1101,4 +1103,5 @@ def run_task1_baseline(  # noqa: C901
 
 
 if __name__ == "__main__":
-    typer.run(run_task1_baseline)
+    # typer.run(run_task1_baseline)
+    typer.run(run_task2_support_strategy_baseline)
