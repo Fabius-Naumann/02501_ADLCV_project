@@ -2,16 +2,61 @@ import torch
 from loguru import logger
 from torchvision.ops import nms
 import torchvision.transforms.functional as F
+import torchvision.transforms.functional as TF
+from torchvision.ops import box_iou
 
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.data import Task1DetectionDataset
+from detgpt.support_samples import find_support_indices, side_by_side
+from detgpt.box_utils import cxcywh_tensor_to_xyxy
 from detgpt import FIGURES_DIR
 
 import matplotlib
-matplotlib.use('Agg')  # MUST be before importing pyplot for HPC
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
+
+def get_support_crops_for_vlm(dataset, category_name, query_index, n_support=3, debug_dir=None):
+    """
+    Uses the dataset to find 'n' support images, crops the exact object, 
+    and returns a list of PIL Images. Optionally saves them to debug_dir.
+    """
+    support_pil_images = []
+    support_indices = find_support_indices(dataset, category_name, query_index, n_support)
+    
+    if debug_dir:
+        debug_path = Path(debug_dir) / f"support_debug_{category_name}"
+        debug_path.mkdir(parents=True, exist_ok=True)
+
+    for i, idx in enumerate(support_indices):
+        image_tensor, target = dataset[idx]
+        boxes_any = target.get("boxes")
+        category_names = [str(n) for n in target.get("category_names", [])]
+        
+        selected_indices = [idx for idx, name in enumerate(category_names) if name == category_name]
+        if not selected_indices:
+            continue
+            
+        # Get the first matching box
+        box = boxes_any[selected_indices[0]].unsqueeze(0)
+        box_xyxy = cxcywh_tensor_to_xyxy(box).to(dtype=torch.int64)[0]
+        
+        # Crop and convert
+        x_min, y_min, x_max, y_max = box_xyxy.tolist()
+        cropped_tensor = image_tensor[:, y_min:y_max, x_min:x_max]
+        crop_pil = TF.to_pil_image(cropped_tensor)
+        
+        support_pil_images.append(crop_pil)
+        
+        # Save for debugging
+        if debug_dir:
+            crop_pil.save(debug_path / f"support_{i}_idx_{idx}.png")
+            
+    if debug_dir:
+        logger.info(f"Saved {len(support_pil_images)} support crops to {debug_path}")
+        
+    return support_pil_images
 
 class FusionPipeline:
     def __init__(self, device="cuda"):
@@ -30,53 +75,97 @@ class FusionPipeline:
             crops.append(image_tensor[:, y1:y2, x1:x2])
         return crops
     
-    def run(self, image_tensor, category, detailed_prompt=None):
-            """
-            The main Fusion workflow for Task 3.
-            """
-            # Broad Querying
-            # If there is not a detailed prompt available, we fall back to the category name
-            query = detailed_prompt if detailed_prompt else f"{category}."
-            logger.info(f"Broad Querying with: '{query}'")
+    def run(self, image_tensor, category, dataset, query_index, detailed_prompt=None):
+        # ---------------------------------------------------------
+        # PHASE 1: DINO PROPOSALS (The Broad Query)
+        # ---------------------------------------------------------
+        query = detailed_prompt if detailed_prompt else f"{category}."
+        candidates = self.dino.predict_candidates(image_tensor, [query], box_threshold=0.15)
+        
+        k = min(20, len(candidates["boxes"]))
+        top_scores, top_idx = torch.topk(candidates["scores"], k)
+        boxes_to_verify = candidates["boxes"][top_idx]
+        crops = self.extract_crops(image_tensor, boxes_to_verify)
+
+        # ---------------------------------------------------------
+        # PHASE 2: SUBTASK (B) - VLM AS VERIFIER
+        # ---------------------------------------------------------
+        logger.info(f"--- Executing Subtask (b): Few-Shot Verification ---")
+        # Inside FusionPipeline.run()
+        support_images = get_support_crops_for_vlm(
+            dataset, 
+            category, 
+            query_index, 
+            n_support=5, 
+            debug_dir=FIGURES_DIR  
+        )
+        
+        vlm_scores = self.qwen.verify_crops(crops, support_images, category_name=category)
+        vlm_scores = vlm_scores.to(boxes_to_verify.device)
+        
+        # Filter out anything the VLM said "No" to
+        conf_threshold = 0.30
+        verified_mask = vlm_scores > conf_threshold
+        verified_boxes = boxes_to_verify[verified_mask]
+        verified_scores = vlm_scores[verified_mask]
+        verified_crops = [crops[i] for i in range(len(crops)) if verified_mask[i]]
+
+        # ---------------------------------------------------------
+        # PHASE 3: SUBTASK (C) - VLM-GUIDED NMS
+        # ---------------------------------------------------------
+        logger.info(f"--- Executing Subtask (c): VLM-Guided NMS ---")
+        
+        keep_indices = []
+        # Start with boxes sorted by verification score
+        remaining_idxs = verified_scores.argsort(descending=True).tolist()
+        iou_threshold = 0.15
+
+        while len(remaining_idxs) > 0:
+            current_best = remaining_idxs.pop(0)
+            keep_indices.append(current_best)
             
-            candidates = self.dino.predict_candidates(
-                image_tensor, [query], box_threshold=0.05
-            )
+            next_remaining = []
             
-            if len(candidates["boxes"]) == 0:
-                logger.warning("No candidates found by DINO.")
-                return None
-
-            # 2. Optimization (Top-K)
-            # We limit to 20 crops to prevent the VLM from hanging/OOM
-            k = min(20, len(candidates["boxes"]))
-            top_scores, top_idx = torch.topk(candidates["scores"], k)
-            boxes_to_verify = candidates["boxes"][top_idx]
-
-            # Extract patches
-            crops = self.extract_crops(image_tensor, boxes_to_verify)
-
-            # VLM Verification
-            logger.info(f"Verifying {len(crops)} crops via Qwen...")
-            vlm_scores = self.qwen.verify_crops(crops, category)
-
-            # VLM-Guided NMS
-            # Use VLM scores to decide which overlapping box is actually the best
-            logger.info("Performing VLM-Guided NMS...")
-            keep_idx = nms(boxes_to_verify, vlm_scores, iou_threshold=0.3)
-            
-            final_boxes = boxes_to_verify[keep_idx]
-            final_scores = vlm_scores[keep_idx]
-
-            return {
-                "boxes": final_boxes,          # The final survivors
-                "scores": final_scores,         # The final scores
-                "count": len(final_boxes),
-                "all_boxes": boxes_to_verify,   # Add this: The 20 candidates
-                "keep_indices": keep_idx,       # Add this: The indices chosen by NMS
-                "vlm_scores": vlm_scores        # Add this: All 20 scores from Leona
-            }
+            for other_idx in remaining_idxs:
+                # Calculate Overlap
+                iou = box_iou(verified_boxes[current_best].unsqueeze(0), 
+                              verified_boxes[other_idx].unsqueeze(0)).item()
+                
+                if iou > iou_threshold:
+                    logger.info(f"Overlap detected (IoU={iou:.2f}). Initiating VLM Duel...")
+                    # They overlap! Send both crops to the VLM Referee
+                    winner = self.qwen.nms_duel(
+                        verified_crops[current_best], 
+                        verified_crops[other_idx], 
+                        category
+                    )
                     
+                    if winner == "B":
+                        logger.info("VLM chose Box B. Swapping...")
+                        # Box B was framed better! Replace our current best.
+                        keep_indices[-1] = other_idx
+                        current_best = other_idx
+                    else:
+                        logger.info("VLM chose Box A. Suppressing Box B.")
+                    # The loser is discarded (not added to next_remaining)
+                else:
+                    # No overlap, keep it for the next round
+                    next_remaining.append(other_idx)
+                    
+            remaining_idxs = next_remaining
+
+        final_boxes = verified_boxes[keep_indices]
+        final_scores = verified_scores[keep_indices]
+
+        return {
+            "boxes": final_boxes,
+            "scores": final_scores,
+            "count": len(final_boxes),
+            "all_boxes": boxes_to_verify,     # Red boxes
+            "keep_indices": keep_indices,     # Green boxes
+            "vlm_scores": vlm_scores
+        }
+
 def visualize_fusion_comparison(image_tensor, all_boxes, final_indices, scores, category, save_path):
     """
     Shows the 'Sea of Red' candidates vs the final 'VLM-Green' boxes.
@@ -126,13 +215,38 @@ if __name__ == "__main__":
     dataset = Task1DetectionDataset(split="val")
     
     # Test on a specific image
-    img_idx = 12 
-    test_cat = "cat"
+    img_idx = 11 
+    test_cat = "dog"
     image, _ = dataset[img_idx]
 
-    prompt = "A transparent glass bottle containing liquid, with a metallic screw cap."
+    # Save the raw query image so you can verify it's front-facing
+    query_save_path = FIGURES_DIR / f"raw_query_{img_idx}.png"
+    TF.to_pil_image(image).save(query_save_path)
+    logger.info(f"Saved raw query image to {query_save_path}")
 
-    results = pipeline.run(image, test_cat, detailed_prompt=prompt)
+    # --- NEW: SUBTASK (A) INTEGRATION ---
+    # Create the support collage for description generation
+    support_indices = find_support_indices(dataset, test_cat, img_idx, n_support=3)
+    support_samples = [dataset[idx] for idx in support_indices]
+    
+    support_collage = side_by_side(
+        target_img=None,
+        n_support_img=support_samples,
+        support_category_name=test_cat
+    )
+
+    # 2. Generate the "Optimal Query"
+    logger.info("Generating optimal text prompt from support images...")
+    prompt = pipeline.qwen.generate_support_description(support_collage, test_cat)
+    logger.info(f"VLM Generated Description: {prompt}")
+
+    results = pipeline.run(
+        image_tensor=image, 
+        category=test_cat, 
+        dataset=dataset,      # <--- ADD THIS
+        query_index=img_idx,  # <--- ADD THIS
+        detailed_prompt=prompt
+    )
 
     if results:
         logger.success(f"Fusion Finished! Found {results['count']} verified {test_cat}(s).")
@@ -145,5 +259,5 @@ if __name__ == "__main__":
             results["keep_indices"], # The indices that survived
             results["vlm_scores"],   # The actual VLM scores
             test_cat, 
-            FIGURES_DIR / "fusion_debug_comparison_cat.png"
+            FIGURES_DIR / "fusion_debug_comparison_dog_textvision.png"
         )

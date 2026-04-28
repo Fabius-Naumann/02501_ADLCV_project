@@ -6,9 +6,7 @@ import re
 from typing import Any
 
 import torch
-import torch.nn.functional as F
-import torchvision.transforms.functional as TF  
-
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -100,7 +98,7 @@ class GroundingDINOHandler:
         image_tensor: Tensor,
         category_names: list[str],
         box_threshold: float = 0.1,  # Lower for Task 3
-        text_threshold: float = 0.1, # Lower for Task 3
+        text_threshold: float = 0.1,  # Lower for Task 3
     ) -> dict[str, Tensor | list[str]]:
         """
         High-recall candidate generation for Task 3 Fusion.
@@ -129,7 +127,7 @@ class GroundingDINOHandler:
         )[0]
 
         return {
-            "boxes": result["boxes"],   # xyxy format
+            "boxes": result["boxes"],  # xyxy format
             "scores": result["scores"],
             "labels": [str(label) for label in result.get("text_labels", result.get("labels", []))],
         }
@@ -281,6 +279,14 @@ class QwenVLMHandler:
                 trust_remote_code=True,
                 token=hf_token,
             ).to(self.device)
+
+            # Token IDs for Task 3.B
+            self.yes_token_id = self.processor.tokenizer.encode("Yes", add_special_tokens=False)[0]
+            self.no_token_id = self.processor.tokenizer.encode("No", add_special_tokens=False)[0]
+            # Token IDs for Task 3.C
+            self.a_token_id = self.processor.tokenizer.encode("A", add_special_tokens=False)[0]
+            self.b_token_id = self.processor.tokenizer.encode("B", add_special_tokens=False)[0]
+
         except OSError as error:
             alternatives = [
                 "Qwen/Qwen2-VL-2B-Instruct",
@@ -743,39 +749,78 @@ class QwenVLMHandler:
             ]
 
         return outputs
-    
-    def verify_crops(self, crops: list, category_name: str) -> torch.Tensor:
-        """
-        Leona's Task: Verifies if the primary object in each crop is the target.
-        Returns a tensor of scores [0.0, 1.0].
-        """
+
+    def verify_crops(self, crops, support_images, category_name):
         scores = []
-        
-        # 1. Define the tokens for "Yes" and "No" 
-        prompt = f"<|image_pad|>Is the main object in this image a {category_name}? Answer only Yes or No."
+        support_tags = " ".join(["<|image_pad|>"] * len(support_images))
+        prompt = (
+            f"Here are reference examples of the target object ({category_name}):\n"
+            f"{support_tags}\n"
+            f"Now look at this candidate image:\n"
+            f"<|image_pad|>\n"
+            f"Does this candidate image strictly contain the exact target object shown in the references? "
+            f"Answer only Yes or No."
+        )
 
         for crop in crops:
-            # Convert crop tensor back to PIL for the processor
-            image_pil = TF.to_pil_image(crop)
-            
-            # Prepare inputs
-            inputs = self.processor(text=[prompt], images=[image_pil], return_tensors="pt").to(self.device)
-            
-            with torch.no_grad():
-                # We only need the first token of the output to determine Yes/No
-                outputs = self.model(**inputs)
-                logits = outputs.logits[:, -1, :] # Look at the last predicted token
-                
-                # 2. Extract probabilities for 'Yes' and 'No' tokens
-                probs = torch.softmax(logits, dim=-1)
-                
-                # For this PoC, we'll look for the highest probability between 'Yes' (id=...) and 'No' (id=...)
-                # Dummy logic: Let's assume the model just returns a probability score, in a real VLM, you'd compare the logit of "Yes" vs "No"
-                yes_prob = probs.max().item() # Placeholder for the 'Yes' token probability
-                
-                scores.append(yes_prob)
+            crop_pil = TF.to_pil_image(crop)
+            all_images = support_images + [crop_pil]
 
-        return torch.tensor(scores, dtype=torch.float32, device=self.device)
+            inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits[0, -1, :]
+
+                # Isolated Binary Softmax for Yes/No
+                binary_probs = torch.softmax(torch.stack([logits[self.yes_token_id], logits[self.no_token_id]]), dim=0)
+                scores.append(binary_probs[0].item())
+
+        return torch.tensor(scores, dtype=torch.float32, device=crops[0].device)
+
+    def nms_duel(self, crop_a, crop_b, category_name):
+        """
+        Takes two overlapping crops. Asks the VLM which one frames the object better.
+        Returns 'A' or 'B'.
+        """
+        prompt = (
+            f"<|image_pad|> This is Image A.\n"
+            f"<|image_pad|> This is Image B.\n"
+            f"Both images show a {category_name}. Which image frames the entire object better without cutting it off? "
+            f"Answer only A or B."
+        )
+
+        img_a = TF.to_pil_image(crop_a)
+        img_b = TF.to_pil_image(crop_b)
+
+        inputs = self.processor(text=[prompt], images=[img_a, img_b], return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits = outputs.logits[0, -1, :]
+
+            # Isolated Binary Softmax for A/B
+            a_score = logits[self.a_token_id].item()
+            b_score = logits[self.b_token_id].item()
+
+            # Return the winning token
+            return "A" if a_score > b_score else "B"
+
+    def generate_support_description(self, support_image, category_name, max_new_tokens=128):
+        # support_image is the PIL collage created by side_by_side
+        prompt = (
+            f"<|image_pad|>\nDescribe the visual attributes of the {category_name} in these images. "
+            f"Focus on shape, color, texture, and typical context to help an object detector find it."
+        )
+
+        inputs = self.processor(text=[prompt], images=[support_image], return_tensors="pt").to(self.device)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        # Trim the prompt tokens from the output
+        description = self.processor.batch_decode(
+            generated_ids[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
+        )[0]
+        return description.strip()
 
     def predict_with_support_query_panel(
         self,
