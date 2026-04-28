@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 import torch
-import torchvision.transforms.functional as TF
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
