@@ -45,27 +45,56 @@ class GroundingDINOHandler:
         self,
         model_id: str = "IDEA-Research/grounding-dino-tiny",
         use_prompt_aliases: bool = True,
+        threshold: float = 0.3,
     ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
         self.use_prompt_aliases = use_prompt_aliases
+        self.threshold = threshold
 
     def _to_prompt(self, category_name: str) -> str:
         if not self.use_prompt_aliases:
             return category_name.replace("_", " ")
         return PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
 
+    def _post_process(
+        self,
+        outputs: Any,
+        input_ids: torch.Tensor,
+        image_pil: Image.Image,
+        threshold: float,
+    ) -> dict[str, torch.Tensor]:
+        target_sizes = [image_pil.size[::-1]]
+
+        try:
+            return self.processor.post_process_grounded_object_detection(
+                outputs,
+                input_ids,
+                box_threshold=threshold,
+                text_threshold=threshold,
+                target_sizes=target_sizes,
+            )[0]
+        except TypeError:
+            return self.processor.post_process_grounded_object_detection(
+                outputs,
+                input_ids=input_ids,
+                threshold=threshold,
+                target_sizes=target_sizes,
+            )[0]
+
     def predict(
         self,
         image_tensor: Tensor,
         category_names: list[str],
-        threshold: float = 0.3,
+        threshold: float | None = None,
     ) -> dict[str, Tensor | list[str]]:
-        all_boxes = []
-        all_scores = []
-        all_labels = []
+        all_boxes: list[Tensor] = []
+        all_scores: list[Tensor] = []
+        all_labels: list[str] = []
+
+        resolved_threshold = self.threshold if threshold is None else threshold
 
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
@@ -75,18 +104,21 @@ class GroundingDINOHandler:
         for category_name in cleaned_category_names:
             text_prompt = self._to_prompt(category_name) + "."
 
-            inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+            inputs = self.processor(
+                images=image_pil,
+                text=text_prompt,
+                return_tensors="pt",
+            ).to(self.device)
 
             with torch.no_grad():
                 outputs = self.model(**inputs)
 
-            result = self.processor.post_process_grounded_object_detection(
-                outputs,
-                inputs.input_ids,
-                box_threshold=threshold,
-                text_threshold=threshold,
-                target_sizes=[image_pil.size[::-1]],
-            )[0]
+            result = self._post_process(
+                outputs=outputs,
+                input_ids=inputs.input_ids,
+                image_pil=image_pil,
+                threshold=resolved_threshold,
+            )
 
             boxes = result["boxes"].detach().cpu().to(torch.float32)
             scores = result["scores"].detach().cpu().to(torch.float32)
