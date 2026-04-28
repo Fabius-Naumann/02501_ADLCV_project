@@ -12,7 +12,7 @@ def debug_fusion_step(dataset_index: int, category_name: str):
     dataset = Task1DetectionDataset(split="val")
     handler = GroundingDINOHandler()
 
-    image_tensor, target = dataset[dataset_index]
+    image_tensor, _ = dataset[dataset_index]
 
     # Run Broad Query
     # We pass the category name in a list to see how it's formatted
@@ -25,19 +25,19 @@ def debug_fusion_step(dataset_index: int, category_name: str):
 
     # --- VISUALIZATION ---
     image_np = image_tensor.permute(1, 2, 0).cpu().numpy()
-    fig, ax = plt.subplots(figsize=(10, 10))
+    _, ax = plt.subplots(figsize=(10, 10))
     ax.imshow(image_np)
 
     boxes = detections["boxes"].cpu().numpy()
     scores = detections["scores"].cpu().numpy()
 
-    for i, (box, score) in enumerate(zip(boxes, scores)):
+    for _, (box, score) in enumerate(zip(boxes, scores, strict=True)):
         x1, y1, x2, y2 = box
         # Create a rectangle patch
         rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=1, edgecolor="r", facecolor="none", alpha=0.6)
         ax.add_patch(rect)
         # Optional: Label with score to see which are "weak" candidates
-        ax.text(x1, y1, f"{score:.2f}", color="white", fontsize=6, bbox=dict(facecolor="red", alpha=0.5))
+        ax.text(x1, y1, f"{score:.2f}", color="white", fontsize=6, bbox={"facecolor": "red", "alpha": 0.5})
 
     ax.set_title(f"Candidates for '{category_name}' (Count: {len(boxes)})")
     ax.axis("off")

@@ -87,7 +87,7 @@ class FusionPipeline:
         if k == 0:
             logger.info("No candidate boxes found; skipping verification.")
             return candidates["boxes"], candidates["scores"]
-        top_scores, top_idx = torch.topk(candidates["scores"], k)
+        _, top_idx = torch.topk(candidates["scores"], k)
         boxes_to_verify = candidates["boxes"][top_idx]
         crops = self.extract_crops(image_tensor, boxes_to_verify)
 
@@ -183,7 +183,7 @@ def visualize_fusion_comparison(image_tensor, all_boxes, final_indices, scores, 
     kept_boxes = all_boxes[final_indices]
     kept_scores = scores[final_indices]
 
-    for box, score in zip(kept_boxes, kept_scores):
+    for box, score in zip(kept_boxes, kept_scores, strict=True):
         x1, y1, x2, y2 = box.cpu().numpy()
         rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=3, edgecolor="#39FF14", facecolor="none")
         ax.add_patch(rect)
@@ -196,7 +196,7 @@ def visualize_fusion_comparison(image_tensor, all_boxes, final_indices, scores, 
             color="black",
             fontsize=12,
             fontweight="bold",
-            bbox=dict(facecolor="#39FF14", alpha=0.9, edgecolor="none"),
+            bbox={"facecolor": "#39FF14", "alpha": 0.9, "edgecolor": "none"},
         )
 
     plt.title("Fusion Debug: Red (Candidates) vs Green (VLM Verified)", fontsize=16)

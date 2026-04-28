@@ -219,7 +219,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are highlighted with red bounding boxes. "
+        "You will be provided with support example images where the relevant objects "
+        "are highlighted with red bounding boxes. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -232,7 +233,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_MARKED = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are highlighted with red mark on them. "
+        "You will be provided with support example images where the relevant objects "
+        "are highlighted with red mark on them. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -764,7 +766,7 @@ class QwenVLMHandler:
 
         for crop in crops:
             crop_pil = TF.to_pil_image(crop)
-            all_images = support_images + [crop_pil]
+            all_images = [*support_images, crop_pil]
 
             inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
 
