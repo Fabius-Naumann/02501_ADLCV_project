@@ -271,11 +271,14 @@ def cropped_supports_to_images(
         selected_boxes = boxes_any[selected_indices]
         boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
 
-        x_min = boxes_xyxy[:, 0].min().item()
-        y_min = boxes_xyxy[:, 1].min().item()
-        x_max = boxes_xyxy[:, 2].max().item()
-        y_max = boxes_xyxy[:, 3].max().item()
+        _, height, width = image.shape
+        x_min = max(0, min(boxes_xyxy[:, 0].min().item(), width))
+        y_min = max(0, min(boxes_xyxy[:, 1].min().item(), height))
+        x_max = max(0, min(boxes_xyxy[:, 2].max().item(), width))
+        y_max = max(0, min(boxes_xyxy[:, 3].max().item(), height))
 
+        if x_max <= x_min or y_max <= y_min:
+            continue
         cropped_image = image[:, y_min:y_max, x_min:x_max]
         img_u8 = _to_uint8_image(cropped_image)
         cropped_supports.append(to_pil_image(img_u8))
