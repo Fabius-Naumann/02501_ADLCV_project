@@ -290,10 +290,10 @@ class QwenVLMHandler:
         )
 
     def _build_task2_support_conditioned_prompt(self, category_name: str, max_detections: int) -> str:
-        """Build a direct few-shot detection prompt using support and query in one panel."""
+        """Build a direct few-shot detection prompt using separate support and query images."""
         return (
-            "You are provided with a support-image and a query image."
-            f"The support image contains one or more examples of the target object class '{category_name}'. "
+            "You are provided with two images. The first image is a support panel containing examples of "
+            f"the target object class '{category_name}'. The second image is the query image. "
             f"Detect objects of class '{category_name}' only in the query image. "
             f"Set each detection label to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
@@ -411,15 +411,19 @@ class QwenVLMHandler:
 
     def _generate_text(
         self,
-        image_pil: Image.Image,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float,
+        image_pil: Image.Image | None = None,
+        prompt: str = "",
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
         system_prompt: str | None = None,
+        image_pils: list[Image.Image] | None = None,
     ) -> str:
         """Run one image-text generation step with chat-template fallback."""
         resolved_system_prompt = system_prompt or self._SYSTEM_PROMPT_OBJECT_DETECTION
         used_chat_template = False
+        images = image_pils if image_pils is not None else ([image_pil] if image_pil is not None else [])
+        if not images:
+            raise ValueError("At least one image must be provided.")
         try:
             messages = [
                 {
@@ -429,7 +433,7 @@ class QwenVLMHandler:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": image_pil},
+                        *[{"type": "image", "image": image} for image in images],
                         {"type": "text", "text": prompt},
                     ],
                 },
@@ -439,11 +443,11 @@ class QwenVLMHandler:
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            inputs = self.processor(text=[text_prompt], images=[image_pil], return_tensors="pt")
+            inputs = self.processor(text=[text_prompt], images=images, return_tensors="pt")
             used_chat_template = True
         except (AttributeError, TypeError, ValueError):
             fallback_prompt = f"{resolved_system_prompt}\n\n{prompt}"
-            inputs = self.processor(images=image_pil, text=fallback_prompt, return_tensors="pt")
+            inputs = self.processor(images=images, text=fallback_prompt, return_tensors="pt")
 
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         do_sample = temperature > 0
@@ -808,25 +812,8 @@ class QwenVLMHandler:
             max_detections=max_detections,
         )
 
-        # Combine support panel and query image side by side
-        support_height = support_panel_pil.height
-        support_width = support_panel_pil.width
-        query_resized = query_image_pil.copy()
-        if query_resized.height != support_height:
-            new_width = max(1, round(query_resized.width * (support_height / query_resized.height)))
-            query_resized = query_resized.resize((new_width, support_height), Image.Resampling.BILINEAR)
-
-        query_offset_x = support_width + 8
-        query_resized_width = query_resized.width
-        combined_width = support_width + query_resized_width + 8
-        combined_height = support_height
-        combined_canvas = Image.new("RGB", (combined_width, combined_height), color=(255, 255, 255))
-        combined_canvas.paste(support_panel_pil, (0, 0))
-        combined_canvas.paste(query_resized, (query_offset_x, 0))
-
-        # Generate detections
         generated_text = self._generate_text(
-            image_pil=combined_canvas,
+            image_pils=[support_panel_pil, query_image_pil],
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -836,66 +823,8 @@ class QwenVLMHandler:
         # Parse output
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
 
-        # Adjust detections from combined image coordinates to query-only coordinates
-        adjusted_detections = []
-        reference_max = self._REFERENCE_COORD_MAX
-        for detection in parsed_detections:
-            if not isinstance(detection, dict):
-                continue
-            box = detection.get("bbox_xyxy")
-            if not isinstance(box, list) or len(box) != 4:
-                continue
-            try:
-                x1, y1, x2, y2 = [float(value) for value in box]
-            except (TypeError, ValueError):
-                continue
-
-            # Convert from 0-1000 reference frame to pixel coordinates in combined image
-            combined_x1 = x1 * combined_width / reference_max
-            combined_y1 = y1 * combined_height / reference_max
-            combined_x2 = x2 * combined_width / reference_max
-            combined_y2 = y2 * combined_height / reference_max
-
-            # Subtract query offset to get coordinates relative to query image
-            query_x1 = combined_x1 - query_offset_x
-            query_y1 = combined_y1
-            query_x2 = combined_x2 - query_offset_x
-            query_y2 = combined_y2
-
-            # Clip to valid query image bounds (accounting for resizing)
-            query_x1 = max(0.0, min(query_x1, query_resized_width))
-            query_y1 = max(0.0, min(query_y1, support_height))
-            query_x2 = max(0.0, min(query_x2, query_resized_width))
-            query_y2 = max(0.0, min(query_y2, support_height))
-
-            # Skip if box is invalid after clipping
-            if query_x2 <= query_x1 or query_y2 <= query_y1:
-                continue
-
-            # Convert back to 0-1000 reference frame relative to original query image
-            # First scale from resized query image to original query image
-            scale_x = query_image_width / query_resized_width if query_resized_width > 0 else 1.0
-            scale_y = query_image_height / support_height
-
-            adjusted_x1 = (
-                (query_x1 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x1
-            )
-            adjusted_y1 = (
-                (query_y1 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y1
-            )
-            adjusted_x2 = (
-                (query_x2 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x2
-            )
-            adjusted_y2 = (
-                (query_y2 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y2
-            )
-
-            adjusted_detection = detection.copy()
-            adjusted_detection["bbox_xyxy"] = [adjusted_x1, adjusted_y1, adjusted_x2, adjusted_y2]
-            adjusted_detections.append(adjusted_detection)
-
         boxes, scores, labels = self._extract_category_detections(
-            detections=adjusted_detections,
+            detections=parsed_detections,
             category_name=normalized_category_name,
             image_width=query_image_width,
             image_height=query_image_height,
