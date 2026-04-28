@@ -264,12 +264,12 @@ def _ground_truth_record_for_category(
     target: dict[str, Any],
     category_name: str,
 ) -> dict[str, Any]:
+    """Build one category-filtered ground-truth record in cxcywh format."""
     category_boxes = [
         target["boxes"][index].detach().cpu().tolist()
         for index, label in enumerate(target["category_names"])
         if str(label).casefold() == category_name.casefold()
     ]
-
     return {
         "image_path": image_path,
         "boxes": category_boxes,
@@ -282,6 +282,7 @@ def _save_task2_results(
     metrics_by_method: dict[str, Any],
     method_rows: list[dict[str, Any]],
 ) -> None:
+    """Persist Task 2 metrics and summary CSV."""
     metrics_path = run_dir / "task2_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file_handle:
         json.dump(metrics_by_method, file_handle, indent=2)
@@ -303,69 +304,6 @@ def _save_task2_results(
 
     logger.info("Saved Task 2 metrics to {}", metrics_path)
     logger.info("Saved Task 2 summary to {}", summary_path)
-
-
-def _sample_balanced_indices(
-    dataset: Task1DetectionDataset,
-    samples_per_class: int,
-    seed: int,
-    limit: int,
-) -> list[int]:
-    rng = random.Random(seed)
-
-    per_class: dict[str, list[int]] = defaultdict(list)
-
-    for index, sample in enumerate(dataset.samples):
-        classes = {
-            str(annotation.get("category_name", "")).strip()
-            for annotation in sample.get("annotations", [])
-            if str(annotation.get("category_name", "")).strip()
-        }
-
-        for class_name in classes:
-            per_class[class_name].append(index)
-
-    selected_indices: list[int] = []
-    used_indices: set[int] = set()
-
-    class_names = sorted(per_class)
-    logger.info("Balanced sampling over {} classes: {}", len(class_names), class_names)
-
-    for class_name in class_names:
-        candidate_indices = per_class[class_name][:]
-        rng.shuffle(candidate_indices)
-
-        added_for_class = 0
-        for index in candidate_indices:
-            if index in used_indices:
-                continue
-
-            selected_indices.append(index)
-            used_indices.add(index)
-            added_for_class += 1
-
-            if added_for_class >= samples_per_class:
-                break
-
-        logger.info(
-            "Selected {} unique images for class '{}' from {} candidates.",
-            added_for_class,
-            class_name,
-            len(candidate_indices),
-        )
-
-    rng.shuffle(selected_indices)
-
-    if limit > 0:
-        selected_indices = selected_indices[:limit]
-
-    logger.info("Balanced selected image count: {}", len(selected_indices))
-    return selected_indices
-
-
-def _sequential_indices(dataset: Task1DetectionDataset, limit: int) -> list[int]:
-    max_count = len(dataset) if limit <= 0 else min(limit, len(dataset))
-    return list(range(max_count))
 
 
 def _process_single_sample(
@@ -834,4 +772,5 @@ def run_task1_baseline(
 
 
 if __name__ == "__main__":
-    typer.run(run_task1_baseline)
+    # typer.run(run_task1_baseline)
+    typer.run(run_task2_support_strategy_baseline)
