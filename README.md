@@ -97,6 +97,23 @@ Expected JSON record format:
 
 Note: `boxes` are expected in `cxcywh` format for both predictions and ground truth.
 
+### 3. Run Support Samples for Task 2
+
+```bash
+CATEGORY_NAMES="dog,truck,mail_slot"
+
+uv run python -m detgpt.evaluate \
+  --query-split val \
+  --support-split train \
+  --limit 20 \
+  --category-names "$CATEGORY_NAMES" \
+  --qwen-model-id Qwen/Qwen3.5-2B \
+  --qwen-max-detections-per-category 1 \
+  --localization-max-new-tokens 256 \
+  --qwen-temperature 0.0 \
+  --save-results
+  ```
+
 ## Project structure
 
 The directory structure of the project looks like this:
