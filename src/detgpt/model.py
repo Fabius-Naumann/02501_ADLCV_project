@@ -13,9 +13,22 @@ from ultralytics import YOLOWorld
 
 from detgpt.box_utils import xyxy_to_cxcywh
 
+PROMPT_ALIASES = {
+    "cincture": "decorative cincture belt worn around the waist",
+    "yoke_(animal_equipment)": "wooden animal yoke equipment for oxen or horses",
+    "knocker_(on_a_door)": "metal door knocker mounted on a door",
+    "poker_(fire_stirring_tool)": "long metal fireplace poker tool",
+    "pew_(church_bench)": "wooden church pew bench",
+    "mail_slot": "rectangular mail slot on a door",
+    "cufflink": "small metal cufflink on shirt cuff",
+    "oil_lamp": "antique oil lamp with glass chimney",
+    "gravy_boat": "ceramic gravy boat sauce boat with spout and handle",
+    "quiche": "round savory quiche tart",
+}
+
 
 class Model(nn.Module):
-    """Just a dummy model to show how to structure your code"""
+    """Minimal dummy model scaffold."""
 
     def __init__(self):
         super().__init__()
@@ -28,12 +41,21 @@ class Model(nn.Module):
 class GroundingDINOHandler:
     """Wrapper for Grounding DINO zero-shot object detection."""
 
-    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny"):
-        """Initialize model and processor."""
+    def __init__(
+        self,
+        model_id: str = "IDEA-Research/grounding-dino-tiny",
+        use_prompt_aliases: bool = True,
+    ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
+        self.use_prompt_aliases = use_prompt_aliases
+
+    def _to_prompt(self, category_name: str) -> str:
+        if not self.use_prompt_aliases:
+            return category_name.replace("_", " ")
+        return PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
 
     def predict(
         self,
@@ -51,7 +73,7 @@ class GroundingDINOHandler:
         cleaned_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
 
         for category_name in cleaned_category_names:
-            text_prompt = category_name.replace("_", " ") + "."
+            text_prompt = self._to_prompt(category_name) + "."
 
             inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
 
@@ -61,7 +83,7 @@ class GroundingDINOHandler:
             result = self.processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                threshold=threshold,
+                box_threshold=threshold,
                 text_threshold=threshold,
                 target_sizes=[image_pil.size[::-1]],
             )[0]
@@ -97,19 +119,21 @@ class YOLOWorldHandler:
         imgsz: int = 640,
         conf: float = 0.05,
         device: str = "cpu",
+        use_prompt_aliases: bool = True,
     ) -> None:
         self.model = YOLOWorld(model_id)
         self.imgsz = imgsz
         self.conf = conf
         self.device = device
-
-        # CPU is the default/recommended workaround for the CLIP text-encoder
-        # device mismatch that can occur in set_classes(...), but the device
-        # remains configurable.
+        self.use_prompt_aliases = use_prompt_aliases
         self.model.to(self.device)
 
+    def _to_prompt(self, category_name: str) -> str:
+        if not self.use_prompt_aliases:
+            return category_name.replace("_", " ")
+        return PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
+
     def predict(self, image: Tensor, query_categories: list[str]) -> dict[str, Tensor | list[str]]:
-        """Run YOLO-World on one image and return normalized predictions."""
         if not query_categories:
             return {
                 "boxes": torch.empty((0, 4), dtype=torch.float32),
@@ -117,9 +141,13 @@ class YOLOWorldHandler:
                 "labels": [],
             }
 
-        self.model.set_classes(query_categories)
+        query_categories = list(dict.fromkeys([name.strip() for name in query_categories if name.strip()]))
 
-        # Ultralytics expects HWC numpy input
+        prompt_categories = [self._to_prompt(category_name) for category_name in query_categories]
+        prompt_to_original = dict(zip(prompt_categories, query_categories, strict=True))
+
+        self.model.set_classes(prompt_categories)
+
         image_np = image.permute(1, 2, 0).mul(255).clamp(0, 255).byte().cpu().numpy()
 
         results = self.model.predict(
@@ -142,7 +170,11 @@ class YOLOWorldHandler:
         boxes = result.boxes.xyxy.detach().cpu().to(torch.float32)
         scores = result.boxes.conf.detach().cpu().to(torch.float32)
         class_indices = [int(value) for value in result.boxes.cls.detach().cpu().tolist()]
-        labels = [query_categories[index] for index in class_indices]
+
+        labels = []
+        for index in class_indices:
+            prompt_label = prompt_categories[index]
+            labels.append(prompt_to_original[prompt_label])
 
         return {
             "boxes": boxes,
@@ -174,55 +206,36 @@ class QwenVLMHandler:
     )
 
     def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
-        """Initialize model and processor.
-
-        Args:
-            model_id: Hugging Face model identifier.
-        """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 
-        try:
-            self.processor = AutoProcessor.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                token=hf_token,
-            )
-            dtype = torch.float16 if self.device == "cuda" else torch.float32
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                token=hf_token,
-            ).to(self.device)
-        except OSError as error:
-            alternatives = [
-                "Qwen/Qwen2-VL-2B-Instruct",
-                "Qwen/Qwen2.5-VL-3B-Instruct",
-                "Qwen/Qwen2.5-VL-7B-Instruct",
-                "Qwen/Qwen3.5-2B",
-                "Qwen/Qwen3.5-4B",
-                "Qwen/Qwen3.5-9B",
-            ]
-            raise OSError(
-                f"Failed to load model_id='{model_id}'. This usually means the repo id is invalid or private/gated. "
-                f"Try one of: {alternatives}. If you need a private model, authenticate with `hf auth login` "
-                "or set HF_TOKEN/HUGGINGFACE_HUB_TOKEN."
-            ) from error
+        self.processor = AutoProcessor.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            token=hf_token,
+        )
+
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        self.model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            token=hf_token,
+        ).to(self.device)
 
         self.model.eval()
 
     def _build_prompt(self, category_name: str, max_detections: int) -> str:
-        """Build a per-request user prompt for one category."""
+        visual_prompt = PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
         return (
             f"Detect objects of class '{category_name}' in this image. "
+            f"The visual description is: {visual_prompt}. "
             f"Set each detection 'label' field to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
         )
 
     def _build_description_prompt(self, category_name: str) -> str:
-        """Build a prompt that asks for a support-conditioned visual description."""
         return (
             f"The red box shows an example of '{category_name}'. "
             "Write a short description of the boxed object using only visually distinguishing traits. "
@@ -236,7 +249,6 @@ class QwenVLMHandler:
         output_label: str,
         max_detections: int,
     ) -> str:
-        """Build a detection prompt from a generated support description."""
         return (
             "Detect objects in this image that match the following support-derived description: "
             f"{description.strip()} "
@@ -247,7 +259,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _extract_json_blob(generated_text: str) -> Any | None:
-        """Extract first JSON value (object or array) from model output."""
         decoder = json.JSONDecoder()
         for start_index, char in enumerate(generated_text):
             if char not in "[{":
@@ -262,8 +273,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _normalize_json_detections(parsed_json: Any) -> list[dict[str, list[float] | float | str]]:
-        """Normalize JSON detections into a unified detection dictionary format."""
-        raw_detections: list[Any]
         if isinstance(parsed_json, dict):
             detections_value = parsed_json.get("detections", [])
             raw_detections = detections_value if isinstance(detections_value, list) else []
@@ -303,7 +312,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _extract_coordinate_pair_detections(generated_text: str) -> list[dict[str, list[float] | float]]:
-        """Extract detections from text like ``label(x1,y1),(x2,y2)``."""
         pattern = re.compile(
             r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*,\s*"
             r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)"
@@ -323,8 +331,8 @@ class QwenVLMHandler:
         self,
         generated_text: str,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Parse generated text into detections with parser diagnostics."""
         json_blob = self._extract_json_blob(generated_text)
+
         if isinstance(json_blob, list):
             json_detections = self._normalize_json_detections(json_blob)
             if json_detections or len(json_blob) == 0:
@@ -332,7 +340,8 @@ class QwenVLMHandler:
                     "parser": "json",
                     "parsed_output": {"detections": json_detections},
                 }
-        elif isinstance(json_blob, dict):
+
+        if isinstance(json_blob, dict):
             detections_value = json_blob.get("detections")
             if isinstance(detections_value, list):
                 json_detections = self._normalize_json_detections(json_blob)
@@ -362,15 +371,12 @@ class QwenVLMHandler:
         temperature: float,
         system_prompt: str | None = None,
     ) -> str:
-        """Run one image-text generation step with chat-template fallback."""
         resolved_system_prompt = system_prompt or self._SYSTEM_PROMPT_OBJECT_DETECTION
         used_chat_template = False
+
         try:
             messages = [
-                {
-                    "role": "system",
-                    "content": resolved_system_prompt,
-                },
+                {"role": "system", "content": resolved_system_prompt},
                 {
                     "role": "user",
                     "content": [
@@ -391,12 +397,11 @@ class QwenVLMHandler:
             inputs = self.processor(images=image_pil, text=fallback_prompt, return_tensors="pt")
 
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
-        do_sample = temperature > 0
         generation_kwargs = {
             "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
+            "do_sample": temperature > 0,
         }
-        if do_sample:
+        if temperature > 0:
             generation_kwargs["temperature"] = temperature
 
         with torch.no_grad():
@@ -415,7 +420,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _normalize_description(description: str) -> str:
-        """Normalize a generated support description for reuse as detector text."""
         description_text = " ".join(description.strip().split())
         if not description_text:
             raise ValueError("Generated description is empty.")
@@ -429,10 +433,10 @@ class QwenVLMHandler:
         image_height: int,
         max_detections_per_category: int,
     ) -> tuple[list[list[float]], list[float], list[str]]:
-        """Extract sanitized detections and convert from 0-1000 reference coordinates to pixels."""
         boxes: list[list[float]] = []
         scores: list[float] = []
         labels: list[str] = []
+
         reference_max = self._REFERENCE_COORD_MAX
         width_scale = float(max(image_width - 1, 0)) / reference_max
         height_scale = float(max(image_height - 1, 0)) / reference_max
@@ -443,6 +447,7 @@ class QwenVLMHandler:
 
             box = detection.get("bbox_xyxy")
             score = detection.get("score", 0.0)
+
             if not isinstance(box, list) or len(box) != 4:
                 continue
 
@@ -456,6 +461,7 @@ class QwenVLMHandler:
             y1 = min(max(y1, 0.0), reference_max)
             x2 = min(max(x2, 0.0), reference_max)
             y2 = min(max(y2, 0.0), reference_max)
+
             if x2 <= x1 or y2 <= y1:
                 continue
 
@@ -479,26 +485,11 @@ class QwenVLMHandler:
         temperature: float = 0.0,
         return_debug_outputs: bool = False,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
-        """Run prompt-based localization for a list of categories.
-
-        Args:
-            image_tensor: C x H x W tensor from Task1DetectionDataset.
-            category_names: List of labels to query.
-            max_detections_per_category: Maximum detections returned per category.
-            max_new_tokens: Generation length limit.
-            temperature: Decoding temperature.
-            return_debug_outputs: Include per-category input/raw/parsed/final debug payload.
-
-        Returns:
-            Dictionary with keys: boxes (cxcywh), scores, labels.
-            If ``return_debug_outputs=True``, includes ``debug_entries``.
-        """
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
         image_width, image_height = image_pil.size
 
-        cleaned_names = [name.strip() for name in category_names if name.strip()]
-        unique_category_names = list(dict.fromkeys(cleaned_names))
+        unique_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
 
         all_boxes: list[list[float]] = []
         all_scores: list[float] = []
@@ -557,6 +548,7 @@ class QwenVLMHandler:
             "scores": scores_tensor,
             "labels": all_labels,
         }
+
         if return_debug_outputs:
             outputs["debug_entries"] = debug_entries
 
@@ -569,7 +561,6 @@ class QwenVLMHandler:
         max_new_tokens: int = 128,
         temperature: float = 0.0,
     ) -> str:
-        """Generate a concise visual description from a support example image."""
         raw_description = self._generate_text(
             image_pil=support_image,
             prompt=self._build_description_prompt(category_name=category_name),
@@ -589,7 +580,6 @@ class QwenVLMHandler:
         temperature: float = 0.0,
         return_debug_outputs: bool = False,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
-        """Run prompt-based localization using a free-text support description."""
         normalized_description = self._normalize_description(description)
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
@@ -607,6 +597,7 @@ class QwenVLMHandler:
             temperature=temperature,
         )
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+
         boxes, scores, labels = self._extract_category_detections(
             detections=parsed_detections,
             category_name=output_label,
@@ -620,6 +611,7 @@ class QwenVLMHandler:
             "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
             "labels": labels,
         }
+
         if return_debug_outputs:
             outputs["debug_entries"] = [
                 {

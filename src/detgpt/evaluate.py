@@ -20,7 +20,7 @@ from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
-QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
+QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
 YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
 
 
