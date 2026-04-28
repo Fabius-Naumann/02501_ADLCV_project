@@ -217,7 +217,6 @@ class QwenVLMHandler:
         "Do not include markdown, comments, or any extra text."
     )
 
-
     def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
         """Initialize model and processor.
 
@@ -772,7 +771,7 @@ class QwenVLMHandler:
         system_prompt: str | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Detect query objects using a support panel and separate query image.
-        
+
         Args:
             query_image_tensor: Query image tensor (C x H x W) in [0, 1].
             support_panel_pil: PIL.Image with all support examples combined into one panel.
@@ -784,24 +783,24 @@ class QwenVLMHandler:
             temperature: Generation temperature.
             return_debug_outputs: Whether to return debug information.
             system_prompt: Optional system prompt override.
-            
+
         Returns:
             Dictionary with boxes (cxcywh), scores, and labels.
         """
         normalized_category_name = category_name.strip()
         if not normalized_category_name:
             raise ValueError("category_name must be non-empty.")
-        
+
         # Convert query tensor to PIL
         query_image_np = query_image_tensor.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
         query_image_pil = Image.fromarray((query_image_np * 255).astype("uint8"))
-        
+
         # Build the prompt
         prompt = self._build_task2_support_conditioned_prompt(
             category_name=normalized_category_name,
             max_detections=max_detections,
         )
-        
+
         # Combine support panel and query image side by side
         support_height = support_panel_pil.height
         support_width = support_panel_pil.width
@@ -809,7 +808,7 @@ class QwenVLMHandler:
         if query_resized.height != support_height:
             new_width = max(1, round(query_resized.width * (support_height / query_resized.height)))
             query_resized = query_resized.resize((new_width, support_height), Image.Resampling.BILINEAR)
-        
+
         query_offset_x = support_width + 8
         query_resized_width = query_resized.width
         combined_width = support_width + query_resized_width + 8
@@ -817,7 +816,7 @@ class QwenVLMHandler:
         combined_canvas = Image.new("RGB", (combined_width, combined_height), color=(255, 255, 255))
         combined_canvas.paste(support_panel_pil, (0, 0))
         combined_canvas.paste(query_resized, (query_offset_x, 0))
-        
+
         # Generate detections
         generated_text = self._generate_text(
             image_pil=combined_canvas,
@@ -826,10 +825,10 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
         )
-        
+
         # Parse output
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
-        
+
         # Adjust detections from combined image coordinates to query-only coordinates
         adjusted_detections = []
         reference_max = self._REFERENCE_COORD_MAX
@@ -843,43 +842,51 @@ class QwenVLMHandler:
                 x1, y1, x2, y2 = [float(value) for value in box]
             except (TypeError, ValueError):
                 continue
-            
+
             # Convert from 0-1000 reference frame to pixel coordinates in combined image
             combined_x1 = x1 * combined_width / reference_max
             combined_y1 = y1 * combined_height / reference_max
             combined_x2 = x2 * combined_width / reference_max
             combined_y2 = y2 * combined_height / reference_max
-            
+
             # Subtract query offset to get coordinates relative to query image
             query_x1 = combined_x1 - query_offset_x
             query_y1 = combined_y1
             query_x2 = combined_x2 - query_offset_x
             query_y2 = combined_y2
-            
+
             # Clip to valid query image bounds (accounting for resizing)
             query_x1 = max(0.0, min(query_x1, query_resized_width))
             query_y1 = max(0.0, min(query_y1, support_height))
             query_x2 = max(0.0, min(query_x2, query_resized_width))
             query_y2 = max(0.0, min(query_y2, support_height))
-            
+
             # Skip if box is invalid after clipping
             if query_x2 <= query_x1 or query_y2 <= query_y1:
                 continue
-            
+
             # Convert back to 0-1000 reference frame relative to original query image
             # First scale from resized query image to original query image
             scale_x = query_image_width / query_resized_width if query_resized_width > 0 else 1.0
             scale_y = query_image_height / support_height
-            
-            adjusted_x1 = (query_x1 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x1
-            adjusted_y1 = (query_y1 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y1
-            adjusted_x2 = (query_x2 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x2
-            adjusted_y2 = (query_y2 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y2
-            
+
+            adjusted_x1 = (
+                (query_x1 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x1
+            )
+            adjusted_y1 = (
+                (query_y1 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y1
+            )
+            adjusted_x2 = (
+                (query_x2 * scale_x / query_image_width * reference_max) if query_image_width > 0 else query_x2
+            )
+            adjusted_y2 = (
+                (query_y2 * scale_y / query_image_height * reference_max) if query_image_height > 0 else query_y2
+            )
+
             adjusted_detection = detection.copy()
             adjusted_detection["bbox_xyxy"] = [adjusted_x1, adjusted_y1, adjusted_x2, adjusted_y2]
             adjusted_detections.append(adjusted_detection)
-        
+
         boxes, scores, labels = self._extract_category_detections(
             detections=adjusted_detections,
             category_name=normalized_category_name,
@@ -887,7 +894,7 @@ class QwenVLMHandler:
             image_height=query_image_height,
             max_detections_per_category=max_detections,
         )
-        
+
         outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
             "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
             "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
@@ -907,7 +914,7 @@ class QwenVLMHandler:
                     },
                 }
             ]
-        
+
         return outputs
 
     def predict_with_support_images(
@@ -924,7 +931,7 @@ class QwenVLMHandler:
         system_prompt: str | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Detect query objects using separate support and query images.
-        
+
         Args:
             query_image_tensor: Query image tensor (C x H x W) in [0, 1].
             support_images_pil: List of support PIL.Images with highlighted objects.
@@ -936,24 +943,24 @@ class QwenVLMHandler:
             temperature: Generation temperature.
             return_debug_outputs: Whether to return debug information.
             system_prompt: Optional system prompt override.
-            
+
         Returns:
             Dictionary with boxes (cxcywh), scores, and labels.
         """
         normalized_category_name = category_name.strip()
         if not normalized_category_name:
             raise ValueError("category_name must be non-empty.")
-        
+
         # Convert query tensor to PIL
         query_image_np = query_image_tensor.detach().cpu().permute(1, 2, 0).clamp(0, 1).numpy()
         query_image_pil = Image.fromarray((query_image_np * 255).astype("uint8"))
-        
+
         # Build the prompt
         prompt = self._build_task2_support_conditioned_prompt(
             category_name=normalized_category_name,
             max_detections=max_detections,
         )
-        
+
         # For now, concatenate support images vertically and query image horizontally
         # Create a combined image with all support examples above and query below
         if support_images_pil:
@@ -965,13 +972,13 @@ class QwenVLMHandler:
             for support_img in support_images_pil:
                 support_canvas.paste(support_img, (x_offset, 0))
                 x_offset += support_img.width + 8
-            
+
             # Resize query image to match support height
             query_resized = query_image_pil.copy()
             if query_resized.height != support_height:
                 new_width = max(1, round(query_resized.width * (support_height / query_resized.height)))
                 query_resized = query_resized.resize((new_width, support_height), Image.Resampling.BILINEAR)
-            
+
             # Combine support and query side by side
             combined_width = support_canvas.width + query_resized.width + 8
             combined_height = support_height
@@ -981,7 +988,7 @@ class QwenVLMHandler:
             input_image_pil = combined_canvas
         else:
             input_image_pil = query_image_pil
-        
+
         # Generate detections
         generated_text = self._generate_text(
             image_pil=input_image_pil,
@@ -990,7 +997,7 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
         )
-        
+
         # Parse output
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
         boxes, scores, labels = self._extract_category_detections(
@@ -1000,7 +1007,7 @@ class QwenVLMHandler:
             image_height=query_image_height,
             max_detections_per_category=max_detections,
         )
-        
+
         outputs: dict[str, Tensor | list[str] | list[dict[str, Any]]] = {
             "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
             "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
@@ -1020,7 +1027,7 @@ class QwenVLMHandler:
                     },
                 }
             ]
-        
+
         return outputs
 
 
