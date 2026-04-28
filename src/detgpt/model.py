@@ -126,10 +126,17 @@ class GroundingDINOHandler:
             target_sizes=[image_pil.size[::-1]],
         )[0]
 
+        boxes = result["boxes"]  # xyxy format
+        scores = result["scores"]
+        labels = [str(label) for label in result.get("text_labels", result.get("labels", []))]
+
+        # Reconcile lengths to avoid downstream mismatches
+        count = min(len(boxes), len(scores), len(labels))
+
         return {
-            "boxes": result["boxes"],  # xyxy format
-            "scores": result["scores"],
-            "labels": [str(label) for label in result.get("text_labels", result.get("labels", []))],
+            "boxes": boxes[:count],
+            "scores": scores[:count],
+            "labels": labels[:count],
         }
 
 
@@ -282,12 +289,21 @@ class QwenVLMHandler:
                 token=hf_token,
             ).to(self.device)
 
-            # Token IDs for Task 3.B
-            self.yes_token_id = self.processor.tokenizer.encode("Yes", add_special_tokens=False)[0]
-            self.no_token_id = self.processor.tokenizer.encode("No", add_special_tokens=False)[0]
+            # Token IDs for Task 3.B - validate single-token encoding
+            def _get_single_token_id(*candidates: str) -> int:
+                for candidate in candidates:
+                    token_ids = self.processor.tokenizer.encode(candidate, add_special_tokens=False)
+                    if len(token_ids) == 1:
+                        return token_ids[0]
+                raise ValueError(
+                    f"Tokenizer for model_id='{model_id}' does not encode any of {candidates!r} as a single token."
+                )
+
+            self.yes_token_id = _get_single_token_id(" Yes", "Yes")
+            self.no_token_id = _get_single_token_id(" No", "No")
             # Token IDs for Task 3.C
-            self.a_token_id = self.processor.tokenizer.encode("A", add_special_tokens=False)[0]
-            self.b_token_id = self.processor.tokenizer.encode("B", add_special_tokens=False)[0]
+            self.a_token_id = _get_single_token_id(" A", "A")
+            self.b_token_id = _get_single_token_id(" B", "B")
 
         except OSError as error:
             alternatives = [
@@ -765,7 +781,8 @@ class QwenVLMHandler:
         )
 
         for crop in crops:
-            crop_pil = TF.to_pil_image(crop)
+            crop_cpu = crop.detach().cpu() if crop.is_cuda else crop
+            crop_pil = TF.to_pil_image(crop_cpu)
             all_images = [*support_images, crop_pil]
 
             inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
@@ -780,7 +797,7 @@ class QwenVLMHandler:
 
         if not crops:
             return torch.empty(0, dtype=torch.float32, device=self.device)
-        return torch.tensor(scores, dtype=torch.float32, device=crops[0].device)
+        return torch.tensor(scores, dtype=torch.float32, device=self.device)
 
     def nms_duel(self, crop_a, crop_b, category_name):
         """
@@ -794,8 +811,10 @@ class QwenVLMHandler:
             f"Answer only A or B."
         )
 
-        img_a = TF.to_pil_image(crop_a)
-        img_b = TF.to_pil_image(crop_b)
+        crop_a_cpu = crop_a.detach().cpu() if crop_a.is_cuda else crop_a
+        crop_b_cpu = crop_b.detach().cpu() if crop_b.is_cuda else crop_b
+        img_a = TF.to_pil_image(crop_a_cpu)
+        img_b = TF.to_pil_image(crop_b_cpu)
 
         inputs = self.processor(text=[prompt], images=[img_a, img_b], return_tensors="pt").to(self.device)
 

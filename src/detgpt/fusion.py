@@ -86,7 +86,11 @@ class FusionPipeline:
         k = min(20, len(candidates["boxes"]))
         if k == 0:
             logger.info("No candidate boxes found; skipping verification.")
-            return candidates["boxes"], candidates["scores"]
+            return {
+                "boxes": candidates["boxes"],
+                "scores": candidates["scores"],
+                "count": 0,
+            }
         _, top_idx = torch.topk(candidates["scores"], k)
         boxes_to_verify = candidates["boxes"][top_idx]
         crops = self.extract_crops(image_tensor, boxes_to_verify)
