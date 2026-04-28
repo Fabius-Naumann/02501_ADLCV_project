@@ -230,6 +230,75 @@ def marked_side_by_side(
     )
 
 
+def supports_to_images(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+    type: str | None = "box",
+) -> list[Image.Image]:
+    """Return a list of PIL.Images for each support sample (annotated per `type`)."""
+    supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
+    images: list[Image.Image] = []
+    for image, target in supports:
+        rendered = _render_support_image(image, target, category_name=support_category_name, type=type)
+        images.append(to_pil_image(rendered))
+    return images
+
+
+def cropped_supports_to_images(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+) -> list[Image.Image]:
+    """Return cropped PIL.Images for each support sample containing the target class."""
+    cropped_supports = []
+    for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
+        boxes_any = target.get("boxes")
+        category_names_any = target.get("category_names", [])
+        if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
+            continue
+
+        category_names = [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
+
+        if support_category_name is None:
+            support_category_name = next((name for name in category_names if name.strip()), None)
+
+        if support_category_name is None:
+            continue
+
+        selected_indices = [index for index, name in enumerate(category_names) if name == support_category_name]
+        if not selected_indices:
+            continue
+
+        selected_boxes = boxes_any[selected_indices]
+        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
+
+        _, height, width = image.shape
+        x_min = max(0, min(boxes_xyxy[:, 0].min().item(), width))
+        y_min = max(0, min(boxes_xyxy[:, 1].min().item(), height))
+        x_max = max(0, min(boxes_xyxy[:, 2].max().item(), width))
+        y_max = max(0, min(boxes_xyxy[:, 3].max().item(), height))
+
+        if x_max <= x_min or y_max <= y_min:
+            continue
+        cropped_image = image[:, y_min:y_max, x_min:x_max]
+        img_u8 = _to_uint8_image(cropped_image)
+        cropped_supports.append(to_pil_image(img_u8))
+
+    return cropped_supports
+
+
+def marked_supports_to_images(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+) -> list[Image.Image]:
+    """Return a list of PIL.Images for each support sample with a center mark."""
+    supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
+    images: list[Image.Image] = []
+    for image, target in supports:
+        rendered = _render_support_image(image, target, category_name=support_category_name, type="mark")
+        images.append(to_pil_image(rendered))
+    return images
+
+
 def find_support_indices(
     dataset: Task1DetectionDataset,
     category_name: str,
