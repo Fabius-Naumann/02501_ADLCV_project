@@ -14,9 +14,9 @@
 
 **Task 2**
 
-- [ ] design side-by-side layout  -> Leona
-- [ ] design cropped exemplars  -> Leona
-- [ ] design set-of-mark + visual examples  -> Leona
+- [x] design side-by-side layout  -> Leona
+- [x] design cropped exemplars  -> Leona
+- [x] design set-of-mark + visual examples  -> Leona
 - [ ] evaluate all (image-based) strategies with 1- and 5-shot settings on novel classes  -> Leona
 
 - [ ] design and evaluate text-from-vision -> Fabius
