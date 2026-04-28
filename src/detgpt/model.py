@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 import torch
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -90,6 +91,52 @@ class GroundingDINOHandler:
             "boxes": boxes,
             "scores": scores,
             "labels": labels,
+        }
+
+    def predict_candidates(
+        self,
+        image_tensor: Tensor,
+        category_names: list[str],
+        box_threshold: float = 0.1,  # Lower for Task 3
+        text_threshold: float = 0.1,  # Lower for Task 3
+    ) -> dict[str, Tensor | list[str]]:
+        """
+        High-recall candidate generation for Task 3 Fusion.
+        Returns as many boxes as possible for later verification.
+        """
+        # Reuse existing prompt logic
+        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
+        unique_category_names = list(dict.fromkeys(cleaned_category_names))
+        text_prompt = ". ".join(unique_category_names) + "."
+
+        image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
+        image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
+        inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        # Using much lower thresholds for the post-processor
+        result = self.processor.post_process_grounded_object_detection(
+            outputs,
+            inputs.input_ids,
+            threshold=box_threshold,
+            text_threshold=text_threshold,
+            target_sizes=[image_pil.size[::-1]],
+        )[0]
+
+        boxes = result["boxes"]  # xyxy format
+        scores = result["scores"]
+        labels = [str(label) for label in result.get("text_labels", result.get("labels", []))]
+
+        # Reconcile lengths to avoid downstream mismatches
+        count = min(len(boxes), len(scores), len(labels))
+
+        return {
+            "boxes": boxes[:count],
+            "scores": scores[:count],
+            "labels": labels[:count],
         }
 
 
@@ -179,7 +226,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are highlighted with red bounding boxes. "
+        "You will be provided with support example images where the relevant objects "
+        "are highlighted with red bounding boxes. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -192,7 +240,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_MARKED = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are highlighted with red mark on them. "
+        "You will be provided with support example images where the relevant objects "
+        "are highlighted with red mark on them. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -239,6 +288,23 @@ class QwenVLMHandler:
                 trust_remote_code=True,
                 token=hf_token,
             ).to(self.device)
+
+            # Token IDs for Task 3.B - validate single-token encoding
+            def _get_single_token_id(*candidates: str) -> int:
+                for candidate in candidates:
+                    token_ids = self.processor.tokenizer.encode(candidate, add_special_tokens=False)
+                    if len(token_ids) == 1:
+                        return token_ids[0]
+                raise ValueError(
+                    f"Tokenizer for model_id='{model_id}' does not encode any of {candidates!r} as a single token."
+                )
+
+            self.yes_token_id = _get_single_token_id(" Yes", "Yes")
+            self.no_token_id = _get_single_token_id(" No", "No")
+            # Token IDs for Task 3.C
+            self.a_token_id = _get_single_token_id(" A", "A")
+            self.b_token_id = _get_single_token_id(" B", "B")
+
         except OSError as error:
             alternatives = [
                 "Qwen/Qwen2-VL-2B-Instruct",
@@ -701,6 +767,88 @@ class QwenVLMHandler:
             ]
 
         return outputs
+
+    def verify_crops(self, crops, support_images, category_name):
+        scores = []
+        support_tags = " ".join(["<|image_pad|>"] * len(support_images))
+        prompt = (
+            f"Here are reference examples of the target object ({category_name}):\n"
+            f"{support_tags}\n"
+            f"Now look at this candidate image:\n"
+            f"<|image_pad|>\n"
+            f"Does this candidate image strictly contain the exact target object shown in the references? "
+            f"Answer only Yes or No."
+        )
+
+        for crop in crops:
+            crop_cpu = crop.detach().cpu() if crop.is_cuda else crop
+            crop_pil = TF.to_pil_image(crop_cpu)
+            all_images = [*support_images, crop_pil]
+
+            inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits[0, -1, :]
+
+                # Isolated Binary Softmax for Yes/No
+                binary_probs = torch.softmax(torch.stack([logits[self.yes_token_id], logits[self.no_token_id]]), dim=0)
+                scores.append(binary_probs[0].item())
+
+        if not crops:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
+        return torch.tensor(scores, dtype=torch.float32, device=self.device)
+
+    def nms_duel(self, crop_a, crop_b, category_name):
+        """
+        Takes two overlapping crops. Asks the VLM which one frames the object better.
+        Returns 'A' or 'B'.
+        """
+        prompt = (
+            f"<|image_pad|> This is Image A.\n"
+            f"<|image_pad|> This is Image B.\n"
+            f"Both images show a {category_name}. Which image frames the entire object better without cutting it off? "
+            f"Answer only A or B."
+        )
+
+        crop_a_cpu = crop_a.detach().cpu() if crop_a.is_cuda else crop_a
+        crop_b_cpu = crop_b.detach().cpu() if crop_b.is_cuda else crop_b
+        img_a = TF.to_pil_image(crop_a_cpu)
+        img_b = TF.to_pil_image(crop_b_cpu)
+
+        inputs = self.processor(text=[prompt], images=[img_a, img_b], return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits = outputs.logits[0, -1, :]
+
+            # Isolated Binary Softmax for A/B
+            a_score = logits[self.a_token_id].item()
+            b_score = logits[self.b_token_id].item()
+
+            # Return the winning token
+            return "A" if a_score > b_score else "B"
+
+    def _generate_support_description_from_collage(
+        self,
+        support_image: Image.Image,
+        category_name: str,
+        max_new_tokens: int = 128,
+    ) -> str:
+        """Generate a support description from a side-by-side collage image."""
+        prompt = (
+            f"<|image_pad|>\nDescribe the visual attributes of the {category_name} in these images. "
+            f"Focus on shape, color, texture, and typical context to help an object detector find it."
+        )
+
+        inputs = self.processor(text=[prompt], images=[support_image], return_tensors="pt").to(self.device)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+        # Trim the prompt tokens from the output
+        description = self.processor.batch_decode(
+            generated_ids[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
+        )[0]
+        return description.strip()
 
     def predict_with_support_query_panel(
         self,
