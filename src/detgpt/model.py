@@ -719,12 +719,19 @@ class QwenVLMHandler:
             category_name=normalized_category_name,
             max_detections=max_detections,
         )
+        resolved_system_prompt = (
+            system_prompt
+            or getattr(self, "_SYSTEM_PROMPT_OBJECT_DETECTION", None)
+            or getattr(self, "_TASK2_OBJECT_DETECTION_BOUNDED_BOXES", None)
+            or getattr(self, "_TASK2_OBJECT_DETECTION_CROPPED", None)
+            or getattr(self, "_TASK2_OBJECT_DETECTION_MARKED", "")
+        )
         generated_text = self._generate_text(
             image_pil=support_query_panel,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+            system_prompt=resolved_system_prompt,
         )
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
         boxes, scores, labels = self._extract_category_detections(
