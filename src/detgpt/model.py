@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 import torch
-import torchvision.transforms.functional as TF
 from PIL import Image
 from torch import Tensor, nn
 from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -14,9 +13,22 @@ from ultralytics import YOLOWorld
 
 from detgpt.box_utils import xyxy_to_cxcywh
 
+PROMPT_ALIASES = {
+    "cincture": "decorative cincture belt worn around the waist",
+    "yoke_(animal_equipment)": "wooden animal yoke equipment for oxen or horses",
+    "knocker_(on_a_door)": "metal door knocker mounted on a door",
+    "poker_(fire_stirring_tool)": "long metal fireplace poker tool",
+    "pew_(church_bench)": "wooden church pew bench",
+    "mail_slot": "rectangular mail slot on a door",
+    "cufflink": "small metal cufflink on shirt cuff",
+    "oil_lamp": "antique oil lamp with glass chimney",
+    "gravy_boat": "ceramic gravy boat sauce boat with spout and handle",
+    "quiche": "round savory quiche tart",
+}
+
 
 class Model(nn.Module):
-    """Just a dummy model to show how to structure your code"""
+    """Minimal dummy model scaffold."""
 
     def __init__(self):
         super().__init__()
@@ -29,68 +41,174 @@ class Model(nn.Module):
 class GroundingDINOHandler:
     """Wrapper for Grounding DINO zero-shot object detection."""
 
-    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny"):
-        """Initialize model and processor."""
+    def __init__(
+        self,
+        model_id: str = "IDEA-Research/grounding-dino-tiny",
+        use_prompt_aliases: bool = True,
+        threshold: float = 0.3,
+        multiclass_prompt: bool = True,
+    ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
+        self.use_prompt_aliases = use_prompt_aliases
+        self.threshold = threshold
+        self.multiclass_prompt = multiclass_prompt
+
+    def _to_prompt(self, category_name: str) -> str:
+        if not self.use_prompt_aliases:
+            return category_name.replace("_", " ")
+        return PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
+
+    def _post_process(
+        self,
+        outputs: Any,
+        input_ids: torch.Tensor,
+        image_pil: Image.Image,
+        threshold: float,
+    ) -> dict[str, torch.Tensor]:
+        target_sizes = [image_pil.size[::-1]]
+
+        try:
+            return self.processor.post_process_grounded_object_detection(
+                outputs,
+                input_ids,
+                box_threshold=threshold,
+                text_threshold=threshold,
+                target_sizes=target_sizes,
+            )[0]
+        except TypeError:
+            return self.processor.post_process_grounded_object_detection(
+                outputs,
+                input_ids=input_ids,
+                threshold=threshold,
+                target_sizes=target_sizes,
+            )[0]
+
+    @staticmethod
+    def _normalize_prompt_label(label: Any) -> str:
+        text = label if isinstance(label, str) else str(label)
+        return " ".join(text.replace("_", " ").replace(".", " ").lower().split())
+
+    def _map_grounding_label(
+        self,
+        raw_label: Any,
+        prompt_to_original: dict[str, str],
+        fallback_label: str | None = None,
+    ) -> str | None:
+        normalized_raw = self._normalize_prompt_label(raw_label)
+        if not normalized_raw and fallback_label is not None:
+            return fallback_label
+
+        normalized_prompt_to_original = {
+            self._normalize_prompt_label(prompt): original for prompt, original in prompt_to_original.items()
+        }
+
+        if normalized_raw in normalized_prompt_to_original:
+            return normalized_prompt_to_original[normalized_raw]
+
+        for normalized_prompt, original in normalized_prompt_to_original.items():
+            if normalized_prompt in normalized_raw or normalized_raw in normalized_prompt:
+                return original
+
+        return fallback_label
+
+    def _predict_single_prompt(
+        self,
+        image_pil: Image.Image,
+        text_prompt: str,
+        threshold: float,
+    ) -> dict[str, Any]:
+        inputs = self.processor(
+            images=image_pil,
+            text=text_prompt,
+            return_tensors="pt",
+        ).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        return self._post_process(
+            outputs=outputs,
+            input_ids=inputs.input_ids,
+            image_pil=image_pil,
+            threshold=threshold,
+        )
 
     def predict(
         self,
         image_tensor: Tensor,
         category_names: list[str],
-        threshold: float = 0.3,
+        threshold: float | None = None,
     ) -> dict[str, Tensor | list[str]]:
-        """
-        Run inference on a single image tensor.
+        all_boxes: list[Tensor] = []
+        all_scores: list[Tensor] = []
+        all_labels: list[str] = []
 
-        Args:
-            image_tensor: C x H x W tensor from Task1DetectionDataset.
-            category_names: List of labels to find (e.g., ["cat", "dog"]).
-            threshold: Confidence threshold for detections.
-
-        Returns:
-            Dictionary with:
-                - boxes: Tensor[N, 4] in xyxy pixel coordinates
-                - scores: Tensor[N]
-                - labels: list[str] of length N
-        """
-        cleaned_category_names = [name.strip() for name in category_names if name.strip()]
-        unique_category_names = list(dict.fromkeys(cleaned_category_names))
-        text_prompt = ". ".join(unique_category_names) + "."
+        resolved_threshold = self.threshold if threshold is None else threshold
 
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
 
-        inputs = self.processor(images=image_pil, text=text_prompt, return_tensors="pt").to(self.device)
+        cleaned_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
+        if not cleaned_category_names:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
 
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        prompt_categories = [self._to_prompt(category_name) for category_name in cleaned_category_names]
+        prompt_to_original = dict(zip(prompt_categories, cleaned_category_names, strict=True))
 
-        result = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=threshold,
-            text_threshold=threshold,
-            target_sizes=[image_pil.size[::-1]],
-        )[0]
+        if self.multiclass_prompt:
+            text_prompt = " . ".join(prompt_categories) + "."
+            result = self._predict_single_prompt(
+                image_pil=image_pil,
+                text_prompt=text_prompt,
+                threshold=resolved_threshold,
+            )
 
-        boxes = result["boxes"]
-        scores = result["scores"]
+            boxes = result["boxes"].detach().cpu().to(torch.float32)
+            scores = result["scores"].detach().cpu().to(torch.float32)
+            raw_labels = result.get("labels", result.get("text_labels", []))
+            if raw_labels is None or len(raw_labels) != len(boxes):
+                raw_labels = [""] * len(boxes)
 
-        raw_labels = result["text_labels"] if "text_labels" in result else result["labels"]
-        labels = [str(label) for label in raw_labels]
+            for box, score, raw_label in zip(boxes, scores, raw_labels, strict=True):
+                mapped_label = self._map_grounding_label(raw_label, prompt_to_original)
+                if mapped_label is None:
+                    continue
+                all_boxes.append(box)
+                all_scores.append(score)
+                all_labels.append(mapped_label)
+        else:
+            # Legacy ablation mode: query one class at a time.
+            for category_name, prompt_category in zip(cleaned_category_names, prompt_categories, strict=True):
+                result = self._predict_single_prompt(
+                    image_pil=image_pil,
+                    text_prompt=prompt_category + ".",
+                    threshold=resolved_threshold,
+                )
+                boxes = result["boxes"].detach().cpu().to(torch.float32)
+                scores = result["scores"].detach().cpu().to(torch.float32)
+                for box, score in zip(boxes, scores, strict=True):
+                    all_boxes.append(box)
+                    all_scores.append(score)
+                    all_labels.append(category_name)
 
-        count = min(len(boxes), len(scores), len(labels))
-        boxes = boxes[:count]
-        scores = scores[:count]
-        labels = labels[:count]
+        if all_boxes:
+            boxes_tensor = torch.stack(all_boxes).to(torch.float32)
+            scores_tensor = torch.stack(all_scores).to(torch.float32)
+        else:
+            boxes_tensor = torch.empty((0, 4), dtype=torch.float32)
+            scores_tensor = torch.empty((0,), dtype=torch.float32)
 
         return {
-            "boxes": boxes,
-            "scores": scores,
-            "labels": labels,
+            "boxes": boxes_tensor,
+            "scores": scores_tensor,
+            "labels": all_labels,
         }
 
     def predict_candidates(
@@ -148,20 +266,22 @@ class YOLOWorldHandler:
         model_id: str = "yolov8s-world.pt",
         imgsz: int = 640,
         conf: float = 0.05,
-        device: str = "cpu",
+        device: str | None = None,
+        use_prompt_aliases: bool = True,
     ) -> None:
         self.model = YOLOWorld(model_id)
         self.imgsz = imgsz
         self.conf = conf
-        self.device = device
-
-        # CPU is the default/recommended workaround for the CLIP text-encoder
-        # device mismatch that can occur in set_classes(...), but the device
-        # remains configurable.
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_prompt_aliases = use_prompt_aliases
         self.model.to(self.device)
 
+    def _to_prompt(self, category_name: str) -> str:
+        if not self.use_prompt_aliases:
+            return category_name.replace("_", " ")
+        return PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
+
     def predict(self, image: Tensor, query_categories: list[str]) -> dict[str, Tensor | list[str]]:
-        """Run YOLO-World on one image and return normalized predictions."""
         if not query_categories:
             return {
                 "boxes": torch.empty((0, 4), dtype=torch.float32),
@@ -169,9 +289,13 @@ class YOLOWorldHandler:
                 "labels": [],
             }
 
-        self.model.set_classes(query_categories)
+        query_categories = list(dict.fromkeys([name.strip() for name in query_categories if name.strip()]))
 
-        # Ultralytics expects HWC numpy input
+        prompt_categories = [self._to_prompt(category_name) for category_name in query_categories]
+        prompt_to_original = dict(zip(prompt_categories, query_categories, strict=True))
+
+        self.model.set_classes(prompt_categories)
+
         image_np = image.permute(1, 2, 0).mul(255).clamp(0, 255).byte().cpu().numpy()
 
         results = self.model.predict(
@@ -194,7 +318,11 @@ class YOLOWorldHandler:
         boxes = result.boxes.xyxy.detach().cpu().to(torch.float32)
         scores = result.boxes.conf.detach().cpu().to(torch.float32)
         class_indices = [int(value) for value in result.boxes.cls.detach().cpu().tolist()]
-        labels = [query_categories[index] for index in class_indices]
+
+        labels = []
+        for index in class_indices:
+            prompt_label = prompt_categories[index]
+            labels.append(prompt_to_original[prompt_label])
 
         return {
             "boxes": boxes,
@@ -226,8 +354,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects "
-        "are highlighted with red bounding boxes. "
+        "You will be provided with support example images where the relevant objects are "
+        "highlighted with red bounding boxes. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -267,11 +395,6 @@ class QwenVLMHandler:
     )
 
     def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
-        """Initialize model and processor.
-
-        Args:
-            model_id: Hugging Face model identifier.
-        """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 
@@ -323,16 +446,16 @@ class QwenVLMHandler:
         self.model.eval()
 
     def _build_prompt(self, category_name: str, max_detections: int) -> str:
-        """Build a per-request user prompt for one category."""
+        visual_prompt = PROMPT_ALIASES.get(category_name, category_name.replace("_", " "))
         return (
             f"Detect objects of class '{category_name}' in this image. "
+            f"The visual description is: {visual_prompt}. "
             f"Set each detection 'label' field to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
         )
 
     def _build_description_prompt(self, category_name: str) -> str:
-        """Build a prompt that asks for a support-conditioned visual description."""
         return (
             f"The red box shows an example of '{category_name}'. "
             "Write a short description of the boxed object using only visually distinguishing traits. "
@@ -346,7 +469,6 @@ class QwenVLMHandler:
         output_label: str,
         max_detections: int,
     ) -> str:
-        """Build a detection prompt from a generated support description."""
         return (
             "Detect objects in this image that match the following support-derived description: "
             f"{description.strip()} "
@@ -368,7 +490,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _extract_json_blob(generated_text: str) -> Any | None:
-        """Extract first JSON value (object or array) from model output."""
         decoder = json.JSONDecoder()
         for start_index, char in enumerate(generated_text):
             if char not in "[{":
@@ -383,8 +504,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _normalize_json_detections(parsed_json: Any) -> list[dict[str, list[float] | float | str]]:
-        """Normalize JSON detections into a unified detection dictionary format."""
-        raw_detections: list[Any]
         if isinstance(parsed_json, dict):
             detections_value = parsed_json.get("detections", [])
             raw_detections = detections_value if isinstance(detections_value, list) else []
@@ -424,7 +543,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _extract_coordinate_pair_detections(generated_text: str) -> list[dict[str, list[float] | float]]:
-        """Extract detections from text like ``label(x1,y1),(x2,y2)``."""
         pattern = re.compile(
             r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*,\s*"
             r"\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)"
@@ -444,8 +562,8 @@ class QwenVLMHandler:
         self,
         generated_text: str,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Parse generated text into detections with parser diagnostics."""
         json_blob = self._extract_json_blob(generated_text)
+
         if isinstance(json_blob, list):
             json_detections = self._normalize_json_detections(json_blob)
             if json_detections or len(json_blob) == 0:
@@ -453,7 +571,8 @@ class QwenVLMHandler:
                     "parser": "json",
                     "parsed_output": {"detections": json_detections},
                 }
-        elif isinstance(json_blob, dict):
+
+        if isinstance(json_blob, dict):
             detections_value = json_blob.get("detections")
             if isinstance(detections_value, list):
                 json_detections = self._normalize_json_detections(json_blob)
@@ -484,7 +603,6 @@ class QwenVLMHandler:
         system_prompt: str | None = None,
         image_pils: list[Image.Image] | None = None,
     ) -> str:
-        """Run one image-text generation step with chat-template fallback."""
         resolved_system_prompt = system_prompt or self._SYSTEM_PROMPT_OBJECT_DETECTION
         used_chat_template = False
         images = image_pils if image_pils is not None else ([image_pil] if image_pil is not None else [])
@@ -492,10 +610,7 @@ class QwenVLMHandler:
             raise ValueError("At least one image must be provided.")
         try:
             messages = [
-                {
-                    "role": "system",
-                    "content": resolved_system_prompt,
-                },
+                {"role": "system", "content": resolved_system_prompt},
                 {
                     "role": "user",
                     "content": [
@@ -516,12 +631,11 @@ class QwenVLMHandler:
             inputs = self.processor(images=images, text=fallback_prompt, return_tensors="pt")
 
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
-        do_sample = temperature > 0
         generation_kwargs = {
             "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
+            "do_sample": temperature > 0,
         }
-        if do_sample:
+        if temperature > 0:
             generation_kwargs["temperature"] = temperature
 
         with torch.no_grad():
@@ -540,7 +654,6 @@ class QwenVLMHandler:
 
     @staticmethod
     def _normalize_description(description: str) -> str:
-        """Normalize a generated support description for reuse as detector text."""
         description_text = " ".join(description.strip().split())
         if not description_text:
             raise ValueError("Generated description is empty.")
@@ -554,10 +667,10 @@ class QwenVLMHandler:
         image_height: int,
         max_detections_per_category: int,
     ) -> tuple[list[list[float]], list[float], list[str]]:
-        """Extract sanitized detections and convert from 0-1000 reference coordinates to pixels."""
         boxes: list[list[float]] = []
         scores: list[float] = []
         labels: list[str] = []
+
         reference_max = self._REFERENCE_COORD_MAX
         width_scale = float(max(image_width - 1, 0)) / reference_max
         height_scale = float(max(image_height - 1, 0)) / reference_max
@@ -568,6 +681,7 @@ class QwenVLMHandler:
 
             box = detection.get("bbox_xyxy")
             score = detection.get("score", 0.0)
+
             if not isinstance(box, list) or len(box) != 4:
                 continue
 
@@ -581,6 +695,7 @@ class QwenVLMHandler:
             y1 = min(max(y1, 0.0), reference_max)
             x2 = min(max(x2, 0.0), reference_max)
             y2 = min(max(y2, 0.0), reference_max)
+
             if x2 <= x1 or y2 <= y1:
                 continue
 
@@ -624,8 +739,7 @@ class QwenVLMHandler:
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
         image_width, image_height = image_pil.size
 
-        cleaned_names = [name.strip() for name in category_names if name.strip()]
-        unique_category_names = list(dict.fromkeys(cleaned_names))
+        unique_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
 
         all_boxes: list[list[float]] = []
         all_scores: list[float] = []
@@ -685,6 +799,7 @@ class QwenVLMHandler:
             "scores": scores_tensor,
             "labels": all_labels,
         }
+
         if return_debug_outputs:
             outputs["debug_entries"] = debug_entries
 
@@ -698,7 +813,6 @@ class QwenVLMHandler:
         temperature: float = 0.0,
         system_prompt: str | None = None,
     ) -> str:
-        """Generate a concise visual description from a support example image."""
         raw_description = self._generate_text(
             image_pil=support_image,
             prompt=self._build_description_prompt(category_name=category_name),
@@ -719,7 +833,6 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
-        """Run prompt-based localization using a free-text support description."""
         normalized_description = self._normalize_description(description)
         image_tensor_cpu = image_tensor.detach().cpu().clamp(0, 1)
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
@@ -738,6 +851,7 @@ class QwenVLMHandler:
             system_prompt=system_prompt,
         )
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
+
         boxes, scores, labels = self._extract_category_detections(
             detections=parsed_detections,
             category_name=output_label,
@@ -751,6 +865,7 @@ class QwenVLMHandler:
             "scores": torch.tensor(scores, dtype=torch.float32) if scores else torch.zeros((0,), dtype=torch.float32),
             "labels": labels,
         }
+
         if return_debug_outputs:
             outputs["debug_entries"] = [
                 {
@@ -767,88 +882,6 @@ class QwenVLMHandler:
             ]
 
         return outputs
-
-    def verify_crops(self, crops, support_images, category_name):
-        scores = []
-        support_tags = " ".join(["<|image_pad|>"] * len(support_images))
-        prompt = (
-            f"Here are reference examples of the target object ({category_name}):\n"
-            f"{support_tags}\n"
-            f"Now look at this candidate image:\n"
-            f"<|image_pad|>\n"
-            f"Does this candidate image strictly contain the exact target object shown in the references? "
-            f"Answer only Yes or No."
-        )
-
-        for crop in crops:
-            crop_cpu = crop.detach().cpu() if crop.is_cuda else crop
-            crop_pil = TF.to_pil_image(crop_cpu)
-            all_images = [*support_images, crop_pil]
-
-            inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                logits = outputs.logits[0, -1, :]
-
-                # Isolated Binary Softmax for Yes/No
-                binary_probs = torch.softmax(torch.stack([logits[self.yes_token_id], logits[self.no_token_id]]), dim=0)
-                scores.append(binary_probs[0].item())
-
-        if not crops:
-            return torch.empty(0, dtype=torch.float32, device=self.device)
-        return torch.tensor(scores, dtype=torch.float32, device=self.device)
-
-    def nms_duel(self, crop_a, crop_b, category_name):
-        """
-        Takes two overlapping crops. Asks the VLM which one frames the object better.
-        Returns 'A' or 'B'.
-        """
-        prompt = (
-            f"<|image_pad|> This is Image A.\n"
-            f"<|image_pad|> This is Image B.\n"
-            f"Both images show a {category_name}. Which image frames the entire object better without cutting it off? "
-            f"Answer only A or B."
-        )
-
-        crop_a_cpu = crop_a.detach().cpu() if crop_a.is_cuda else crop_a
-        crop_b_cpu = crop_b.detach().cpu() if crop_b.is_cuda else crop_b
-        img_a = TF.to_pil_image(crop_a_cpu)
-        img_b = TF.to_pil_image(crop_b_cpu)
-
-        inputs = self.processor(text=[prompt], images=[img_a, img_b], return_tensors="pt").to(self.device)
-
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits = outputs.logits[0, -1, :]
-
-            # Isolated Binary Softmax for A/B
-            a_score = logits[self.a_token_id].item()
-            b_score = logits[self.b_token_id].item()
-
-            # Return the winning token
-            return "A" if a_score > b_score else "B"
-
-    def _generate_support_description_from_collage(
-        self,
-        support_image: Image.Image,
-        category_name: str,
-        max_new_tokens: int = 128,
-    ) -> str:
-        """Generate a support description from a side-by-side collage image."""
-        prompt = (
-            f"<|image_pad|>\nDescribe the visual attributes of the {category_name} in these images. "
-            f"Focus on shape, color, texture, and typical context to help an object detector find it."
-        )
-
-        inputs = self.processor(text=[prompt], images=[support_image], return_tensors="pt").to(self.device)
-
-        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-        # Trim the prompt tokens from the output
-        description = self.processor.batch_decode(
-            generated_ids[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
-        )[0]
-        return description.strip()
 
     def predict_with_support_query_panel(
         self,
@@ -965,7 +998,7 @@ class QwenVLMHandler:
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         )
 
         # Parse output
@@ -1079,7 +1112,7 @@ class QwenVLMHandler:
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         )
 
         # Parse output
