@@ -31,8 +31,22 @@ DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
 YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
 
+FIXED_5_CLASSES = [
+    "oil_lamp",
+    "gravy_boat",
+    "quiche",
+    "knocker_(on_a_door)",
+    "mail_slot",
+]
 
-def _resolve_detector(detector_backend: str, model_id: str | None):
+
+def _resolve_detector(
+    detector_backend: str,
+    model_id: str | None,
+    yolo_imgsz: int = 640,
+    yolo_conf: float = 0.05,
+    yolo_use_prompt_aliases: bool = True,
+):
     normalized_backend = detector_backend.strip().lower()
 
     if normalized_backend == "grounding_dino":
@@ -45,7 +59,16 @@ def _resolve_detector(detector_backend: str, model_id: str | None):
 
     if normalized_backend == "yolo_world":
         resolved_model_id = model_id or YOLO_DEFAULT_MODEL_ID
-        return normalized_backend, resolved_model_id, YOLOWorldHandler(model_id=resolved_model_id)
+        return (
+            normalized_backend,
+            resolved_model_id,
+            YOLOWorldHandler(
+                model_id=resolved_model_id,
+                imgsz=yolo_imgsz,
+                conf=yolo_conf,
+                use_prompt_aliases=yolo_use_prompt_aliases,
+            ),
+        )
 
     raise typer.BadParameter(
         f"Unsupported detector backend '{detector_backend}'. Use 'grounding_dino', 'qwen_vlm', or 'yolo_world'."
@@ -100,6 +123,56 @@ def _cxcywh_to_xyxy(boxes_cxcywh: torch.Tensor) -> torch.Tensor:
     return torch.stack([x1, y1, x2, y2], dim=1).to(torch.float32)
 
 
+def _inflate_xyxy_boxes(boxes_xyxy: torch.Tensor, scale: float, image_width: int, image_height: int) -> torch.Tensor:
+    """Scale xyxy boxes around their centers for detector geometry ablations.
+
+    Use scale=1.0 for the normal evaluation. Values such as 1.05 or 1.10 test whether
+    detector AP is being hurt by very tight boxes compared with Qwen's coarser boxes.
+    """
+    if boxes_xyxy.numel() == 0 or abs(scale - 1.0) < 1e-8:
+        return boxes_xyxy
+    if scale <= 0:
+        raise ValueError("detector_box_inflate must be positive.")
+
+    boxes = boxes_xyxy.detach().cpu().to(torch.float32)
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    width = (x2 - x1).clamp(min=0.0) * scale
+    height = (y2 - y1).clamp(min=0.0) * scale
+
+    inflated = torch.stack(
+        [
+            (cx - width / 2.0).clamp(min=0.0, max=float(max(image_width - 1, 0))),
+            (cy - height / 2.0).clamp(min=0.0, max=float(max(image_height - 1, 0))),
+            (cx + width / 2.0).clamp(min=0.0, max=float(max(image_width - 1, 0))),
+            (cy + height / 2.0).clamp(min=0.0, max=float(max(image_height - 1, 0))),
+        ],
+        dim=1,
+    )
+    return inflated.to(torch.float32)
+
+
+def _maybe_inflate_detector_boxes(
+    detections: dict[str, Any],
+    backend: str,
+    detector_box_inflate: float,
+    image_width: int,
+    image_height: int,
+) -> dict[str, Any]:
+    if backend == "qwen_vlm" or abs(detector_box_inflate - 1.0) < 1e-8:
+        return detections
+
+    inflated = dict(detections)
+    inflated["boxes"] = _inflate_xyxy_boxes(
+        boxes_xyxy=detections["boxes"],
+        scale=detector_box_inflate,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    return inflated
+
+
 def _prediction_record(image_path: str, backend: str, detections: dict[str, Any]) -> dict[str, Any]:
     boxes = detections["boxes"]
     scores = detections["scores"]
@@ -117,11 +190,23 @@ def _prediction_record(image_path: str, backend: str, detections: dict[str, Any]
     }
 
 
-def _ground_truth_record(image_path: str, target: dict[str, Any]) -> dict[str, Any]:
+def _ground_truth_record(
+    image_path: str,
+    target: dict[str, Any],
+    category_name: str,
+) -> dict[str, Any]:
+    """Build one category-filtered ground-truth record in cxcywh format."""
+
+    category_boxes = [
+        target["boxes"][index].detach().cpu().tolist()
+        for index, label in enumerate(target["category_names"])
+        if str(label).casefold() == category_name.casefold()
+    ]
+
     return {
         "image_path": image_path,
-        "boxes": target["boxes"].detach().cpu().tolist(),
-        "labels": [str(category_name) for category_name in target["category_names"]],
+        "boxes": category_boxes,
+        "labels": [category_name] * len(category_boxes),
     }
 
 
@@ -221,7 +306,13 @@ def _record_summary(
     )
 
 
-def _save_results(run_dir: Path, metrics: dict[str, Any], summary_data: list[dict[str, Any]]) -> None:
+def _save_results(
+    run_dir: Path,
+    metrics: dict[str, Any],
+    summary_data: list[dict[str, Any]],
+    predictions: list[dict[str, Any]] | None = None,
+    ground_truth: list[dict[str, Any]] | None = None,
+) -> None:
     metrics_path = run_dir / "metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file_handle:
         json.dump(metrics, file_handle, indent=2)
@@ -234,6 +325,18 @@ def _save_results(run_dir: Path, metrics: dict[str, Any], summary_data: list[dic
         )
         writer.writeheader()
         writer.writerows(summary_data)
+
+    if predictions is not None:
+        predictions_path = run_dir / "predictions.json"
+        with predictions_path.open("w", encoding="utf-8") as file_handle:
+            json.dump(predictions, file_handle, indent=2)
+        logger.info("Saved predictions to {}", predictions_path)
+
+    if ground_truth is not None:
+        ground_truth_path = run_dir / "ground_truth.json"
+        with ground_truth_path.open("w", encoding="utf-8") as file_handle:
+            json.dump(ground_truth, file_handle, indent=2)
+        logger.info("Saved ground truth to {}", ground_truth_path)
 
     logger.info("Saved metrics to {}", metrics_path)
     logger.info("Saved detection summary to {}", summary_path)
@@ -368,6 +471,82 @@ def _sequential_indices(dataset: Task1DetectionDataset, limit: int) -> list[int]
     return list(range(max_count))
 
 
+def _resolve_task1_categories(category_names: str) -> list[str]:
+    requested = _extract_query_categories(category_names.split(","))
+    return requested or FIXED_5_CLASSES
+
+
+def _filter_ground_truth_to_categories(
+    image_path: str,
+    target: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    boxes: list[list[float]] = []
+    labels: list[str] = []
+
+    for box, label in zip(target["boxes"], target["category_names"], strict=True):
+        label_text = str(label)
+        if label_text.casefold() not in allowed:
+            continue
+        boxes.append(box.detach().cpu().tolist())
+        labels.append(label_text)
+
+    return {"image_path": image_path, "boxes": boxes, "labels": labels}
+
+
+def _filter_detections_to_categories(
+    detections: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    labels = [str(label) for label in detections["labels"]]
+    keep_indices = [index for index, label in enumerate(labels) if label.casefold() in allowed]
+
+    if not keep_indices:
+        return _empty_detections()
+
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+    filtered = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": detections["scores"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        filtered["debug_entries"] = detections["debug_entries"]
+
+    return filtered
+
+
+def _limit_detections_per_class(detections: dict[str, Any], max_per_class: int) -> dict[str, Any]:
+    if max_per_class <= 0 or len(detections["boxes"]) == 0:
+        return detections
+
+    labels = [str(label) for label in detections["labels"]]
+    scores = detections["scores"].detach().cpu().to(torch.float32)
+    keep_indices: list[int] = []
+
+    for label in sorted(set(labels)):
+        label_indices = [index for index, value in enumerate(labels) if value == label]
+        label_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+        keep_indices.extend(label_indices[:max_per_class])
+
+    keep_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+
+    limited = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": scores.index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        limited["debug_entries"] = detections["debug_entries"]
+
+    return limited
+
+
 def _process_single_sample(
     *,
     index: int,
@@ -380,6 +559,10 @@ def _process_single_sample(
     qwen_max_new_tokens: int,
     qwen_temperature: float,
     qwen_debug_dump: bool,
+    query_categories: list[str],
+    max_detections_per_category: int,
+    eval_gt_mode: str,
+    detector_box_inflate: float,
     save_viz: bool,
     viz_dir: Path | None,
     predictions: list[dict[str, Any]],
@@ -394,8 +577,6 @@ def _process_single_sample(
         logger.warning("Skipping sample {} because local_path is missing.", index)
         return
 
-    query_categories = _extract_query_categories(target["category_names"])
-
     detections = _predict_detections(
         detector=detector,
         normalized_backend=normalized_backend,
@@ -407,7 +588,33 @@ def _process_single_sample(
         qwen_debug_dump=qwen_debug_dump,
     )
 
-    ground_truth.append(_ground_truth_record(image_path, target))
+    detections = _maybe_inflate_detector_boxes(
+        detections=detections,
+        backend=normalized_backend,
+        detector_box_inflate=detector_box_inflate,
+        image_width=int(image.shape[2]),
+        image_height=int(image.shape[1]),
+    )
+
+    detections = _filter_detections_to_categories(
+        detections=detections,
+        query_categories=query_categories,
+    )
+    detections = _limit_detections_per_class(
+        detections=detections,
+        max_per_class=max_detections_per_category,
+    )
+
+    if eval_gt_mode == "all":
+        ground_truth.append(_ground_truth_record(image_path, target))
+    else:
+        ground_truth.append(
+            _filter_ground_truth_to_categories(
+                image_path=image_path,
+                target=target,
+                query_categories=query_categories,
+            )
+        )
     predictions.append(_prediction_record(image_path, normalized_backend, detections))
 
     if qwen_debug_dump and normalized_backend == "qwen_vlm" and "debug_entries" in detections:
@@ -687,7 +894,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     return run_summary
 
 
-def run_task1_baseline(
+def run_task1_baseline(  # noqa: C901
     split: str = typer.Option("val", help="Dataset split to evaluate: val or train."),
     limit: int = typer.Option(20, help="Number of samples to evaluate. Use 0 for all selected samples."),
     detector_backend: str = typer.Option(
@@ -697,6 +904,25 @@ def run_task1_baseline(
     model_id: str | None = typer.Option(
         None,
         help="Model ID or checkpoint path. If omitted, a backend-specific default is used.",
+    ),
+    category_names: str = typer.Option(
+        ",".join(FIXED_5_CLASSES),
+        help="Comma-separated class names to query/evaluate.",
+    ),
+    eval_gt_mode: str = typer.Option(
+        "queried_only",
+        help="Ground-truth evaluation mode: queried_only or all.",
+    ),
+    max_detections_per_category: int = typer.Option(
+        1,
+        help="Post-hoc maximum detections per class for every backend. Use 0 for unlimited.",
+    ),
+    detector_box_inflate: float = typer.Option(
+        1.0,
+        help=(
+            "Scale YOLO/DINO xyxy boxes around their centers before evaluation. "
+            "Use 1.0 for normal eval; 1.05-1.10 for geometry ablation."
+        ),
     ),
     save_results: bool = typer.Option(
         True,
@@ -738,6 +964,19 @@ def run_task1_baseline(
         "--qwen-debug-dump/--no-qwen-debug-dump",
         help="Save raw Qwen prompts, generations, and parser outputs to JSON.",
     ),
+    yolo_imgsz: int = typer.Option(
+        960,
+        help="YOLO-World inference image size.",
+    ),
+    yolo_conf: float = typer.Option(
+        0.001,
+        help="YOLO-World confidence threshold.",
+    ),
+    yolo_use_prompt_aliases: bool = typer.Option(
+        True,
+        "--yolo-prompt-aliases/--yolo-no-prompt-aliases",
+        help="Use descriptive prompt aliases for YOLO-World.",
+    ),
 ) -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / "task1_results" / f"run_{timestamp}"
@@ -750,14 +989,26 @@ def run_task1_baseline(
     if normalized_split not in {"val", "train"}:
         raise typer.BadParameter("Unsupported split. Use 'val' or 'train'.")
 
+    normalized_eval_gt_mode = eval_gt_mode.strip().lower()
+    if normalized_eval_gt_mode not in {"queried_only", "all"}:
+        raise typer.BadParameter("Unsupported --eval-gt-mode. Use 'queried_only' or 'all'.")
+
+    if max_detections_per_category < 0:
+        raise typer.BadParameter("--max-detections-per-category must be >= 0. Use 0 for unlimited.")
+
     if samples_per_class < 1:
         raise typer.BadParameter("--samples-per-class must be at least 1.")
+
+    resolved_query_categories = _resolve_task1_categories(category_names)
 
     dataset = Task1DetectionDataset(split=normalized_split, to_float=True)
 
     normalized_backend, resolved_model_id, detector = _resolve_detector(
         detector_backend=detector_backend,
         model_id=model_id,
+        yolo_imgsz=yolo_imgsz,
+        yolo_conf=yolo_conf,
+        yolo_use_prompt_aliases=yolo_use_prompt_aliases,
     )
 
     if balanced:
@@ -771,12 +1022,18 @@ def run_task1_baseline(
         selected_indices = _sequential_indices(dataset=dataset, limit=limit)
 
     logger.info(
-        "Running backend={} on split={} with model_id={} balanced={} selected_images={}",
+        (
+            "Running backend={} on split={} with model_id={} balanced={} "
+            "selected_images={} categories={} eval_gt_mode={} max_det_per_class={}"
+        ),
         normalized_backend,
         normalized_split,
         resolved_model_id,
         balanced,
         len(selected_indices),
+        resolved_query_categories,
+        normalized_eval_gt_mode,
+        max_detections_per_category,
     )
 
     predictions: list[dict[str, Any]] = []
@@ -802,6 +1059,10 @@ def run_task1_baseline(
             qwen_max_new_tokens=qwen_max_new_tokens,
             qwen_temperature=qwen_temperature,
             qwen_debug_dump=qwen_debug_dump,
+            query_categories=resolved_query_categories,
+            max_detections_per_category=max_detections_per_category,
+            eval_gt_mode=normalized_eval_gt_mode,
+            detector_box_inflate=detector_box_inflate,
             save_viz=save_viz,
             viz_dir=viz_dir,
             predictions=predictions,
@@ -813,7 +1074,13 @@ def run_task1_baseline(
     metrics = evaluate_dataset(predictions=predictions, ground_truth=ground_truth)
 
     if save_results:
-        _save_results(run_dir=run_dir, metrics=metrics, summary_data=summary_data)
+        _save_results(
+            run_dir=run_dir,
+            metrics=metrics,
+            summary_data=summary_data,
+            predictions=predictions,
+            ground_truth=ground_truth,
+        )
 
     if save_viz and viz_dir is not None:
         logger.info("Saved visualizations to {}", viz_dir)

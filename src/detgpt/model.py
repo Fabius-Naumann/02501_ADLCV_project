@@ -46,6 +46,7 @@ class GroundingDINOHandler:
         model_id: str = "IDEA-Research/grounding-dino-tiny",
         use_prompt_aliases: bool = True,
         threshold: float = 0.3,
+        multiclass_prompt: bool = True,
     ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -53,6 +54,7 @@ class GroundingDINOHandler:
         self.model.eval()
         self.use_prompt_aliases = use_prompt_aliases
         self.threshold = threshold
+        self.multiclass_prompt = multiclass_prompt
 
     def _to_prompt(self, category_name: str) -> str:
         if not self.use_prompt_aliases:
@@ -84,6 +86,56 @@ class GroundingDINOHandler:
                 target_sizes=target_sizes,
             )[0]
 
+    @staticmethod
+    def _normalize_prompt_label(label: Any) -> str:
+        text = label if isinstance(label, str) else str(label)
+        return " ".join(text.replace("_", " ").replace(".", " ").lower().split())
+
+    def _map_grounding_label(
+        self,
+        raw_label: Any,
+        prompt_to_original: dict[str, str],
+        fallback_label: str | None = None,
+    ) -> str | None:
+        normalized_raw = self._normalize_prompt_label(raw_label)
+        if not normalized_raw and fallback_label is not None:
+            return fallback_label
+
+        normalized_prompt_to_original = {
+            self._normalize_prompt_label(prompt): original for prompt, original in prompt_to_original.items()
+        }
+
+        if normalized_raw in normalized_prompt_to_original:
+            return normalized_prompt_to_original[normalized_raw]
+
+        for normalized_prompt, original in normalized_prompt_to_original.items():
+            if normalized_prompt in normalized_raw or normalized_raw in normalized_prompt:
+                return original
+
+        return fallback_label
+
+    def _predict_single_prompt(
+        self,
+        image_pil: Image.Image,
+        text_prompt: str,
+        threshold: float,
+    ) -> dict[str, Any]:
+        inputs = self.processor(
+            images=image_pil,
+            text=text_prompt,
+            return_tensors="pt",
+        ).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        return self._post_process(
+            outputs=outputs,
+            input_ids=inputs.input_ids,
+            image_pil=image_pil,
+            threshold=threshold,
+        )
+
     def predict(
         self,
         image_tensor: Tensor,
@@ -100,33 +152,51 @@ class GroundingDINOHandler:
         image_pil = Image.fromarray((image_tensor_cpu.permute(1, 2, 0).numpy() * 255).astype("uint8"))
 
         cleaned_category_names = list(dict.fromkeys([name.strip() for name in category_names if name.strip()]))
+        if not cleaned_category_names:
+            return {
+                "boxes": torch.empty((0, 4), dtype=torch.float32),
+                "scores": torch.empty((0,), dtype=torch.float32),
+                "labels": [],
+            }
 
-        for category_name in cleaned_category_names:
-            text_prompt = self._to_prompt(category_name) + "."
+        prompt_categories = [self._to_prompt(category_name) for category_name in cleaned_category_names]
+        prompt_to_original = dict(zip(prompt_categories, cleaned_category_names, strict=True))
 
-            inputs = self.processor(
-                images=image_pil,
-                text=text_prompt,
-                return_tensors="pt",
-            ).to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-
-            result = self._post_process(
-                outputs=outputs,
-                input_ids=inputs.input_ids,
+        if self.multiclass_prompt:
+            text_prompt = " . ".join(prompt_categories) + "."
+            result = self._predict_single_prompt(
                 image_pil=image_pil,
+                text_prompt=text_prompt,
                 threshold=resolved_threshold,
             )
 
             boxes = result["boxes"].detach().cpu().to(torch.float32)
             scores = result["scores"].detach().cpu().to(torch.float32)
+            raw_labels = result.get("labels", result.get("text_labels", []))
+            if raw_labels is None or len(raw_labels) != len(boxes):
+                raw_labels = [""] * len(boxes)
 
-            for box, score in zip(boxes, scores, strict=True):
+            for box, score, raw_label in zip(boxes, scores, raw_labels, strict=True):
+                mapped_label = self._map_grounding_label(raw_label, prompt_to_original)
+                if mapped_label is None:
+                    continue
                 all_boxes.append(box)
                 all_scores.append(score)
-                all_labels.append(category_name)
+                all_labels.append(mapped_label)
+        else:
+            # Legacy ablation mode: query one class at a time.
+            for category_name, prompt_category in zip(cleaned_category_names, prompt_categories, strict=True):
+                result = self._predict_single_prompt(
+                    image_pil=image_pil,
+                    text_prompt=prompt_category + ".",
+                    threshold=resolved_threshold,
+                )
+                boxes = result["boxes"].detach().cpu().to(torch.float32)
+                scores = result["scores"].detach().cpu().to(torch.float32)
+                for box, score in zip(boxes, scores, strict=True):
+                    all_boxes.append(box)
+                    all_scores.append(score)
+                    all_labels.append(category_name)
 
         if all_boxes:
             boxes_tensor = torch.stack(all_boxes).to(torch.float32)
@@ -150,13 +220,13 @@ class YOLOWorldHandler:
         model_id: str = "yolov8s-world.pt",
         imgsz: int = 640,
         conf: float = 0.05,
-        device: str = "cpu",
+        device: str | None = None,
         use_prompt_aliases: bool = True,
     ) -> None:
         self.model = YOLOWorld(model_id)
         self.imgsz = imgsz
         self.conf = conf
-        self.device = device
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.use_prompt_aliases = use_prompt_aliases
         self.model.to(self.device)
 
