@@ -458,7 +458,11 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     query_loader = DataLoader(query_dataset, batch_size=1, collate_fn=task1_collate_fn)
 
     qwen_handler = QwenVLMHandler(model_id=qwen_model_id)
-    qwen_task2_detection_system_prompt = qwen_handler._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT
+    qwen_task2_detection_system_prompts = {
+        "side_by_side": qwen_handler._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
+        "cropped_exemplars": qwen_handler._TASK2_OBJECT_DETECTION_CROPPED,
+        "set_of_mark_visual": qwen_handler._TASK2_OBJECT_DETECTION_MARKED,
+    }
 
     # Map strategy names to their panel builder functions (target_img=None for support panel only)
     strategy_builders = {
@@ -526,6 +530,8 @@ def run_task2_support_strategy_baseline(  # noqa: C901
 
                 support_samples = [support_dataset[support_index] for support_index in support_indices[:shot]]
                 for strategy_name, strategy_builder in strategy_builders.items():
+                    system_prompt = qwen_task2_detection_system_prompts[strategy_name]
+
                     # Build support panel without query image (target_img=None)
                     support_panel = strategy_builder(
                         target_img=None,
@@ -547,7 +553,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                         max_new_tokens=localization_max_new_tokens,
                         temperature=qwen_temperature,
                         return_debug_outputs=False,
-                        system_prompt=qwen_task2_detection_system_prompt,
+                        system_prompt=system_prompt,
                     )
 
                     _append_eval(

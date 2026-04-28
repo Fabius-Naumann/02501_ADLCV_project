@@ -177,9 +177,35 @@ class QwenVLMHandler:
         "Focus on appearance, shape, parts, texture and material that help someone find the same or similar "
         "object in another image. Do not describe the whole image. Do not mention coordinates or the red box."
     )
-    _TASK2_OBJECT_DETECTION_SYSTEM_PROMPT = (
+    _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects are highlighted. "
+        "You will be provided with support example images where the relevant objects are highlighted with red bounding boxes. "
+        "Use these examples to understand what the target object looks like, then apply this knowledge "
+        "to detect similar objects in the query image. "
+        "When asked to detect elements based on a description, return ONLY valid JSON. "
+        'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
+        '"score": 0.0}]. '
+        "Coordinates must be integers scaled to a fixed 1000x1000 reference frame, where each value is in [0, 1000]. "
+        "Do not output absolute image pixel coordinates. Enforce xmin < xmax and ymin < ymax. "
+        "If no object is present, return []. "
+        "Do not include markdown, comments, or any extra text."
+    )
+    _TASK2_OBJECT_DETECTION_MARKED = (
+        "You are a helpful assistant to detect objects in images in a few-shot setting. "
+        "You will be provided with support example images where the relevant objects are highlighted with red mark on them. "
+        "Use these examples to understand what the target object looks like, then apply this knowledge "
+        "to detect similar objects in the query image. "
+        "When asked to detect elements based on a description, return ONLY valid JSON. "
+        'Return a JSON array in this form: [{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "class_name", '
+        '"score": 0.0}]. '
+        "Coordinates must be integers scaled to a fixed 1000x1000 reference frame, where each value is in [0, 1000]. "
+        "Do not output absolute image pixel coordinates. Enforce xmin < xmax and ymin < ymax. "
+        "If no object is present, return []. "
+        "Do not include markdown, comments, or any extra text."
+    )
+    _TASK2_OBJECT_DETECTION_CROPPED = (
+        "You are a helpful assistant to detect objects in images in a few-shot setting. "
+        "You will be provided with support example images, which are cropped to focus on the relevant objects. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -269,7 +295,7 @@ class QwenVLMHandler:
         return (
             "You are provided with a support-image and a query image."
             f"The support image contains one or more examples of the target object class '{category_name}'. "
-            f"Detect objects of class '{category_name}' only in the query image on the right. "
+            f"Detect objects of class '{category_name}' only in the query image. "
             f"Set each detection label to '{category_name}'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
