@@ -28,22 +28,36 @@ uv run src/detgpt/data.py
 
 ## Evaluation Scripts
 
-The repository currently provides two evaluation entrypoints:
+The repository provides two evaluation entrypoints:
 
-1. `detgpt.evaluate` for model inference on the prepared dataset.
-2. `detgpt.evaluate_files` for metrics computed from prediction/ground-truth JSON files.
+1. `detgpt.evaluate` for running model inference directly on the prepared dataset.
+2. `detgpt.evaluate_files` for computing metrics from saved prediction and ground-truth JSON files.
+
+---
 
 ### 1. Dataset Inference Evaluation (`evaluate.py`)
 
-Run as a module with Typer options:
+This script runs end-to-end evaluation: dataset loading, model inference, and metric computation.
 
-Run Grounding DINO baseline evaluation:
+It is implemented as a CLI using Typer.
+
+#### Standard Evaluation Setting (Recommended)
+
+We use class-balanced sampling to ensure fair comparison across rare LVIS categories:
+
+```bash
+--balanced --samples-per-class 10 --limit 100
+```
+
+Run Grounding Dino:
 
 ```bash
 uv run python -m detgpt.evaluate \
   --detector-backend grounding_dino \
   --split train \
-  --limit 20 \
+  --balanced \
+  --samples-per-class 10 \
+  --limit 100 \
   --save-results \
   --save-viz
 ```
@@ -55,10 +69,24 @@ uv run python -m detgpt.evaluate \
   --detector-backend qwen_vlm \
   --model-id Qwen/Qwen3.5-2B \
   --split train \
-  --limit 20 \
+  --balanced \
+  --samples-per-class 10 \
+  --limit 100 \
   --qwen-max-detections-per-category 5 \
   --qwen-temperature 0.0 \
   --qwen-debug-dump \
+  --save-viz
+```
+
+Run YOLO-World:
+```bash
+uv run python -m detgpt.evaluate \
+  --detector-backend yolo_world \
+  --split train \
+  --balanced \
+  --samples-per-class 10 \
+  --limit 100 \
+  --save-results \
   --save-viz
 ```
 
