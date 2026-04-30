@@ -172,13 +172,17 @@ def cropped_side_by_side(
         if not selected_indices:
             continue
 
-        selected_boxes = boxes_any[selected_indices]
-        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
+        selected_box = boxes_any[selected_indices[0]].unsqueeze(0)
+        box_xyxy = cxcywh_tensor_to_xyxy(selected_box).to(dtype=torch.int64)[0]
 
-        x_min = boxes_xyxy[:, 0].min().item()
-        y_min = boxes_xyxy[:, 1].min().item()
-        x_max = boxes_xyxy[:, 2].max().item()
-        y_max = boxes_xyxy[:, 3].max().item()
+        _, height, width = image.shape
+        x_min = max(0, min(int(box_xyxy[0].item()), width))
+        y_min = max(0, min(int(box_xyxy[1].item()), height))
+        x_max = max(0, min(int(box_xyxy[2].item()), width))
+        y_max = max(0, min(int(box_xyxy[3].item()), height))
+
+        if x_max <= x_min or y_max <= y_min:
+            continue
 
         cropped_image = image[:, y_min:y_max, x_min:x_max]
         cropped_supports.append((cropped_image, target))
@@ -268,14 +272,14 @@ def cropped_supports_to_images(
         if not selected_indices:
             continue
 
-        selected_boxes = boxes_any[selected_indices]
-        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
+        selected_box = boxes_any[selected_indices[0]].unsqueeze(0)
+        box_xyxy = cxcywh_tensor_to_xyxy(selected_box).to(dtype=torch.int64)[0]
 
         _, height, width = image.shape
-        x_min = max(0, min(boxes_xyxy[:, 0].min().item(), width))
-        y_min = max(0, min(boxes_xyxy[:, 1].min().item(), height))
-        x_max = max(0, min(boxes_xyxy[:, 2].max().item(), width))
-        y_max = max(0, min(boxes_xyxy[:, 3].max().item(), height))
+        x_min = max(0, min(int(box_xyxy[0].item()), width))
+        y_min = max(0, min(int(box_xyxy[1].item()), height))
+        x_max = max(0, min(int(box_xyxy[2].item()), width))
+        y_max = max(0, min(int(box_xyxy[3].item()), height))
 
         if x_max <= x_min or y_max <= y_min:
             continue
