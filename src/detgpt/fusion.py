@@ -104,7 +104,7 @@ class FusionPipeline:
         vlm_scores = vlm_scores.to(boxes_to_verify.device)
         
         # Filter out anything the VLM said "No" to
-        conf_threshold = 0.30
+        conf_threshold = 0.50
         verified_mask = vlm_scores > conf_threshold
         verified_boxes = boxes_to_verify[verified_mask]
         verified_scores = vlm_scores[verified_mask]
@@ -219,7 +219,7 @@ if __name__ == "__main__":
     test_cat = "dog"
     image, _ = dataset[img_idx]
 
-    # Save the raw query image so you can verify it's front-facing
+    # Save the raw query image
     query_save_path = FIGURES_DIR / f"raw_query_{img_idx}.png"
     TF.to_pil_image(image).save(query_save_path)
     logger.info(f"Saved raw query image to {query_save_path}")
@@ -237,7 +237,7 @@ if __name__ == "__main__":
 
     # 2. Generate the "Optimal Query"
     logger.info("Generating optimal text prompt from support images...")
-    prompt = pipeline.qwen.generate_support_description(support_collage, test_cat)
+    prompt = pipeline.qwen.generate_crop_support_description(support_collage, test_cat)
     logger.info(f"VLM Generated Description: {prompt}")
 
     results = pipeline.run(
@@ -259,5 +259,5 @@ if __name__ == "__main__":
             results["keep_indices"], # The indices that survived
             results["vlm_scores"],   # The actual VLM scores
             test_cat, 
-            FIGURES_DIR / "fusion_debug_comparison_dog_textvision.png"
+            FIGURES_DIR / f"fusion_debug_comparison_textvision_{test_cat}.png"
         )
