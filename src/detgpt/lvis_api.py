@@ -129,7 +129,7 @@ class LvisAPI(LVIS):
         with ZipFile(archive_path, "r") as zip_file:
             expected_name = json_path.name
             members = zip_file.namelist()
-            member = (
+            member: str | None = (
                 expected_name
                 if expected_name in members
                 else next((name for name in members if name.endswith(expected_name)), None)

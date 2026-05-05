@@ -33,6 +33,10 @@ The repository currently provides two evaluation entrypoints:
 1. `detgpt.evaluate` for model inference on the prepared dataset.
 2. `detgpt.evaluate_files` for metrics computed from prediction/ground-truth JSON files.
 
+PyTorch device selection is automatic for the model wrappers and training scaffold: CUDA is used when available,
+then Apple Metal/MPS on supported macOS machines, then CPU. Unsupported MPS operators fall back to CPU through
+`PYTORCH_ENABLE_MPS_FALLBACK=1` unless you override that environment variable before importing `detgpt`.
+
 ### 1. Dataset Inference Evaluation (`evaluate.py`)
 
 Run as a module with Typer options:

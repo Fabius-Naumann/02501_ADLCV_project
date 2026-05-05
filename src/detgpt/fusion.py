@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import matplotlib
 import torch
 import torchvision.transforms.functional as TF
@@ -7,11 +9,11 @@ from torchvision.ops import box_iou
 from detgpt import FIGURES_DIR
 from detgpt.box_utils import cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset
+from detgpt.device import DeviceSpec, resolve_torch_device
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.support_samples import find_support_indices, side_by_side
 
 matplotlib.use("Agg")
-from pathlib import Path
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -60,10 +62,11 @@ def get_support_crops_for_vlm(dataset, category_name, query_index, n_support=3, 
 
 
 class FusionPipeline:
-    def __init__(self, device="cuda"):
-        self.device = device
-        self.dino = GroundingDINOHandler()
-        self.qwen = QwenVLMHandler()
+    def __init__(self, device: DeviceSpec = None):
+        """Initialize the fusion pipeline with a shared PyTorch device."""
+        self.device = resolve_torch_device(device)
+        self.dino = GroundingDINOHandler(device=self.device)
+        self.qwen = QwenVLMHandler(device=self.device)
         logger.info("Fusion Pipeline Initialized (DINO + Qwen)")
 
     def extract_crops(self, image_tensor, boxes, padding=15):

@@ -13,6 +13,7 @@ from transformers import AutoModelForImageTextToText, AutoModelForZeroShotObject
 from ultralytics import YOLOWorld
 
 from detgpt.box_utils import xyxy_to_cxcywh
+from detgpt.device import DeviceSpec, resolve_torch_device
 
 
 class Model(nn.Module):
@@ -29,9 +30,14 @@ class Model(nn.Module):
 class GroundingDINOHandler:
     """Wrapper for Grounding DINO zero-shot object detection."""
 
-    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny"):
-        """Initialize model and processor."""
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny", device: DeviceSpec = None):
+        """Initialize model and processor.
+
+        Args:
+            model_id: Hugging Face model identifier.
+            device: PyTorch device. Use ``None`` or ``"auto"`` for CUDA, MPS, then CPU.
+        """
+        self.device = resolve_torch_device(device)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.model.eval()
@@ -148,12 +154,20 @@ class YOLOWorldHandler:
         model_id: str = "yolov8s-world.pt",
         imgsz: int = 640,
         conf: float = 0.05,
-        device: str = "cpu",
+        device: DeviceSpec = "cpu",
     ) -> None:
+        """Initialize YOLO-World.
+
+        Args:
+            model_id: Model checkpoint or identifier.
+            imgsz: Inference image size.
+            conf: Confidence threshold.
+            device: PyTorch device. Defaults to CPU for YOLO-World text encoder compatibility.
+        """
         self.model = YOLOWorld(model_id)
         self.imgsz = imgsz
         self.conf = conf
-        self.device = device
+        self.device = resolve_torch_device(device)
 
         # CPU is the default/recommended workaround for the CLIP text-encoder
         # device mismatch that can occur in set_classes(...), but the device
@@ -179,7 +193,7 @@ class YOLOWorldHandler:
             imgsz=self.imgsz,
             conf=self.conf,
             verbose=False,
-            device=self.device,
+            device=str(self.device),
         )
 
         result = results[0]
@@ -266,13 +280,14 @@ class QwenVLMHandler:
         "Do not include markdown, comments, or any extra text."
     )
 
-    def __init__(self, model_id: str = "Qwen/Qwen3.5-2B") -> None:
+    def __init__(self, model_id: str = "Qwen/Qwen3.5-2B", device: DeviceSpec = None) -> None:
         """Initialize model and processor.
 
         Args:
             model_id: Hugging Face model identifier.
+            device: PyTorch device. Use ``None`` or ``"auto"`` for CUDA, MPS, then CPU.
         """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = resolve_torch_device(device)
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 
         try:
@@ -281,7 +296,7 @@ class QwenVLMHandler:
                 trust_remote_code=True,
                 token=hf_token,
             )
-            dtype = torch.float16 if self.device == "cuda" else torch.float32
+            dtype = torch.float16 if self.device.type == "cuda" else torch.float32
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
                 torch_dtype=dtype,
@@ -790,7 +805,7 @@ class QwenVLMHandler:
         )
 
         for crop in crops:
-            crop_cpu = crop.detach().cpu() if crop.is_cuda else crop
+            crop_cpu = crop.detach().cpu() if crop.device.type != "cpu" else crop
             crop_pil = TF.to_pil_image(crop_cpu)
             all_images = [*support_images, crop_pil]
 
@@ -820,8 +835,8 @@ class QwenVLMHandler:
             f"Answer only A or B."
         )
 
-        crop_a_cpu = crop_a.detach().cpu() if crop_a.is_cuda else crop_a
-        crop_b_cpu = crop_b.detach().cpu() if crop_b.is_cuda else crop_b
+        crop_a_cpu = crop_a.detach().cpu() if crop_a.device.type != "cpu" else crop_a
+        crop_b_cpu = crop_b.detach().cpu() if crop_b.device.type != "cpu" else crop_b
         img_a = TF.to_pil_image(crop_a_cpu)
         img_b = TF.to_pil_image(crop_b_cpu)
 
