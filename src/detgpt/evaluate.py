@@ -153,6 +153,7 @@ def _predict_detections(
     qwen_max_new_tokens: int,
     qwen_temperature: float,
     qwen_debug_dump: bool,
+    qwen_thinking_mode: bool,
 ) -> dict[str, Any]:
     """Run backend-specific prediction."""
     if not query_categories:
@@ -166,6 +167,7 @@ def _predict_detections(
             max_new_tokens=qwen_max_new_tokens,
             temperature=qwen_temperature,
             return_debug_outputs=qwen_debug_dump,
+            thinking_mode=qwen_thinking_mode,
         )
 
     return detector.predict(image, query_categories)
@@ -339,6 +341,7 @@ def _process_single_sample(
     qwen_max_new_tokens: int,
     qwen_temperature: float,
     qwen_debug_dump: bool,
+    qwen_thinking_mode: bool,
     save_viz: bool,
     viz_dir: Path | None,
     predictions: list[dict[str, Any]],
@@ -367,6 +370,7 @@ def _process_single_sample(
         qwen_max_new_tokens=qwen_max_new_tokens,
         qwen_temperature=qwen_temperature,
         qwen_debug_dump=qwen_debug_dump,
+        qwen_thinking_mode=qwen_thinking_mode,
     )
 
     ground_truth.append(_ground_truth_record(image_path, target))
@@ -424,6 +428,11 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     qwen_temperature: float = typer.Option(
         0.0,
         help="Generation temperature for Qwen methods.",
+    ),
+    qwen_thinking_mode: bool = typer.Option(
+        False,
+        "--qwen-thinking-mode/--no-qwen-thinking-mode",
+        help="Enable Qwen thinking mode while stripping thinking traces before parsing.",
     ),
     save_results: bool = typer.Option(
         True,
@@ -554,6 +563,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                         temperature=qwen_temperature,
                         return_debug_outputs=False,
                         system_prompt=system_prompt,
+                        thinking_mode=qwen_thinking_mode,
                     )
 
                     _append_eval(
@@ -682,6 +692,11 @@ def run_task1_baseline(
         0.0,
         help="Generation temperature for Qwen-VLM.",
     ),
+    qwen_thinking_mode: bool = typer.Option(
+        False,
+        "--qwen-thinking-mode/--no-qwen-thinking-mode",
+        help="Enable Qwen thinking mode while stripping thinking traces before parsing.",
+    ),
     qwen_debug_dump: bool = typer.Option(
         False,
         "--qwen-debug-dump/--no-qwen-debug-dump",
@@ -739,6 +754,7 @@ def run_task1_baseline(
             qwen_max_new_tokens=qwen_max_new_tokens,
             qwen_temperature=qwen_temperature,
             qwen_debug_dump=qwen_debug_dump,
+            qwen_thinking_mode=qwen_thinking_mode,
             save_viz=save_viz,
             viz_dir=viz_dir,
             predictions=predictions,

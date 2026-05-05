@@ -62,12 +62,15 @@ uv run python -m detgpt.evaluate \
   --limit 20 \
   --qwen-max-detections-per-category 5 \
   --qwen-temperature 0.0 \
+  --no-qwen-thinking-mode \
   --qwen-debug-dump \
   --save-viz
 ```
 
 Output files are written to `outputs/task1_results/run_<timestamp>/`.
 When `--qwen-debug-dump` is enabled, a `qwen_debug_trace.jsonl` file is saved in the same run directory.
+Use `--qwen-thinking-mode` to allow Qwen reasoning traces; debug output keeps the raw trace, while parsing uses the
+stripped final answer.
 
 ### 2. File-Based Metrics Evaluation (`evaluate_files.py`)
 

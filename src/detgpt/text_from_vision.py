@@ -127,6 +127,11 @@ def run_text_from_vision_poc(
     description_max_new_tokens: int = typer.Option(128, help="Maximum tokens for support description generation."),
     localization_max_new_tokens: int = typer.Option(256, help="Maximum tokens for localization generation."),
     temperature: float = typer.Option(0.0, help="Generation temperature."),
+    thinking_mode: bool = typer.Option(
+        False,
+        "--thinking-mode/--no-thinking-mode",
+        help="Enable Qwen thinking mode while keeping parser inputs free of thinking traces.",
+    ),
     save_viz: bool = typer.Option(
         True,
         "--save-viz/--no-save-viz",
@@ -172,11 +177,12 @@ def run_text_from_vision_poc(
     )
 
     vlm_handler = QwenVLMHandler(model_id=model_id)
-    generated_description = vlm_handler.generate_support_description(
+    generated_description, description_debug = vlm_handler.generate_support_description_debug(
         support_image=support_image,
         category_name=category_name,
         max_new_tokens=description_max_new_tokens,
         temperature=temperature,
+        thinking_mode=thinking_mode,
     )
     detections = vlm_handler.predict_from_description(
         image_tensor=query_image,
@@ -186,6 +192,7 @@ def run_text_from_vision_poc(
         max_new_tokens=localization_max_new_tokens,
         temperature=temperature,
         return_debug_outputs=True,
+        thinking_mode=thinking_mode,
     )
 
     image_path = str(dataset.samples[resolved_query_index].get("local_path", ""))
@@ -209,7 +216,9 @@ def run_text_from_vision_poc(
             "query_index": resolved_query_index,
             "support_indices": support_indices,
             "model_id": model_id,
+            "thinking_mode": thinking_mode,
             "generated_description": generated_description,
+            "support_description_debug": description_debug,
             "debug_entries": detections.get("debug_entries", []),
         },
         run_dir / "run_summary.json",
