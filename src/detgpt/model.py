@@ -679,6 +679,12 @@ class QwenVLMHandler:
 
     def _generate_text_with_thinking_budget(
         self,
+        image_pil: Image.Image | None,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+        system_prompt: str | None,
+        image_pils: list[Image.Image] | None,
         text_prompt: str,
         inputs: dict[str, torch.Tensor],
         images: list[Image.Image],
@@ -735,6 +741,26 @@ class QwenVLMHandler:
             f"{assistant_prefill}{thinking_generated_text}{forced_thinking_close}{answer_generated_text}"
         )
         output_text, thinking_text = self._split_thinking_output(raw_output_text)
+        if not output_text:
+            fallback_result = self._generate_text_result(
+                image_pil=image_pil,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                image_pils=image_pils,
+                thinking_mode=False,
+            )
+            return QwenGenerationResult(
+                output_text=fallback_result.output_text,
+                raw_output_text=raw_output_text,
+                thinking_text=thinking_text or partial_thinking_text or partial_raw_output_text or raw_output_text,
+                thinking_mode=True,
+                assistant_prefill=assistant_prefill,
+                thinking_max_new_tokens=thinking_max_new_tokens,
+                fallback_raw_output_text=fallback_result.raw_output_text,
+                fallback_parser_input_text=fallback_result.output_text,
+            )
         return QwenGenerationResult(
             output_text=output_text,
             raw_output_text=raw_output_text,
@@ -779,12 +805,19 @@ class QwenVLMHandler:
                     ],
                 },
             ]
-            text_prompt = self.processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=thinking_mode,
-            )
+            try:
+                text_prompt = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=thinking_mode,
+                )
+            except TypeError:
+                text_prompt = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
             assistant_prefill = self._extract_assistant_prefill(text_prompt)
             inputs = self.processor(text=[text_prompt], images=images, return_tensors="pt")
             used_chat_template = True
@@ -803,6 +836,12 @@ class QwenVLMHandler:
 
         if thinking_mode and thinking_max_new_tokens is not None and assistant_prefill.startswith("<think>"):
             return self._generate_text_with_thinking_budget(
+                image_pil=image_pil,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                image_pils=image_pils,
                 text_prompt=text_prompt,
                 inputs=inputs,
                 images=images,
