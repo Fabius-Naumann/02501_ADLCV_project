@@ -339,6 +339,15 @@ class QwenVLMHandler:
             "Keep it to one or two sentences. Mention appearance, shape, material, parts, and local context if useful. "
             "Do not mention the class name unless it is necessary to avoid ambiguity."
         )
+    
+    def _build_crop_description_prompt(self, category_name: str) -> str:
+        """Build a prompt that asks for a support-conditioned visual description."""
+        return (
+            f"Describe the visual attributes of the {category_name} in these images. "
+            "Write a short description of the boxed object using only visually distinguishing traits. "
+            "Keep it to one or two sentences. Mention appearance, shape, material, and parts if useful. "
+            "Do not mention the class name unless it is necessary to avoid ambiguity."
+        )
 
     def _build_description_detection_prompt(
         self,
@@ -828,27 +837,29 @@ class QwenVLMHandler:
 
             # Return the winning token
             return "A" if a_score > b_score else "B"
-
-    def _generate_support_description_from_collage(
+        
+    def generate_crop_support_description(
         self,
         support_image: Image.Image,
         category_name: str,
         max_new_tokens: int = 128,
+        temperature: float = 0.0,
     ) -> str:
-        """Generate a support description from a side-by-side collage image."""
-        prompt = (
-            f"<|image_pad|>\nDescribe the visual attributes of the {category_name} in these images. "
-            f"Focus on shape, color, texture, and typical context to help an object detector find it."
+        """Generate a visual description specifically from cropped support examples."""
+        
+        # We leverage the internal _generate_text helper which handles 
+        # the processor, device routing, and token slicing automatically.
+        raw_description = self._generate_text(
+            image_pil=support_image,
+            prompt=self._build_crop_description_prompt(category_name=category_name),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            system_prompt=self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
         )
-
-        inputs = self.processor(text=[prompt], images=[support_image], return_tensors="pt").to(self.device)
-
-        generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-        # Trim the prompt tokens from the output
-        description = self.processor.batch_decode(
-            generated_ids[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
-        )[0]
-        return description.strip()
+        
+        # Clean up conversational fillers (e.g., "The image shows...") 
+        # to provide a clean string for Grounding DINO.
+        return self._normalize_description(raw_description)
 
     def predict_with_support_query_panel(
         self,
