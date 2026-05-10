@@ -40,6 +40,10 @@ Two evaluation entrypoints are available:
 1. `detgpt.evaluate` for model inference over the prepared Task 1 dataset.
 2. `detgpt.evaluate_files` for metrics computed from JSON prediction and ground-truth files.
 
+PyTorch device selection is automatic for the model wrappers and training scaffold: CUDA is used when available,
+then Apple Metal/MPS on supported macOS machines, then CPU. Unsupported MPS operators fall back to CPU through
+`PYTORCH_ENABLE_MPS_FALLBACK=1` unless you override that environment variable before importing `detgpt`.
+
 ### Inference Evaluation (`evaluate.py`)
 
 Run Grounding DINO baseline evaluation:
@@ -63,12 +67,16 @@ uv run python -m detgpt.evaluate \
   --limit 20 \
   --qwen-max-detections-per-category 5 \
   --qwen-temperature 0.0 \
+  --no-qwen-thinking-mode \
   --qwen-debug-dump \
   --save-viz
 ```
 
 Each run writes outputs to `outputs/task1_results/run_<timestamp>/`.
 When Qwen debug dumping is enabled, `qwen_debug_trace.jsonl` is saved in the same run directory.
+Use `--qwen-thinking-mode` to allow Qwen reasoning traces; debug output keeps the raw trace, while parsing uses the
+stripped final answer. Add `--qwen-thinking-max-new-tokens 256` to cap the thinking phase separately from final-answer
+generation.
 
 ### File-Based Metrics Evaluation (`evaluate_files.py`)
 
