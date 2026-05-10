@@ -254,10 +254,10 @@ if __name__ == "__main__":
         out_path = FIGURES_DIR / save_name
 
         visualize_fusion_comparison(
-            image, 
-            results["all_boxes"],    # The 20 boxes before NMS
-            results["keep_indices"], # The indices that survived
-            results["vlm_scores"],   # The actual VLM scores
-            test_cat, 
-            FIGURES_DIR / f"fusion_debug_comparison_textvision_{test_cat}.png"
+            image,
+            results["all_boxes"],  # The 20 boxes before NMS
+            results["keep_indices"],  # The indices that survived
+            results["vlm_scores"],  # The actual VLM scores
+            test_cat,
+            FIGURES_DIR / f"fusion_debug_comparison_textvision_{test_cat}.png",
         )
