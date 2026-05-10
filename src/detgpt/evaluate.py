@@ -154,6 +154,7 @@ def _predict_detections(
     qwen_temperature: float,
     qwen_debug_dump: bool,
     qwen_thinking_mode: bool,
+    qwen_thinking_max_new_tokens: int | None,
 ) -> dict[str, Any]:
     """Run backend-specific prediction."""
     if not query_categories:
@@ -168,6 +169,7 @@ def _predict_detections(
             temperature=qwen_temperature,
             return_debug_outputs=qwen_debug_dump,
             thinking_mode=qwen_thinking_mode,
+            thinking_max_new_tokens=qwen_thinking_max_new_tokens,
         )
 
     return detector.predict(image, query_categories)
@@ -342,6 +344,7 @@ def _process_single_sample(
     qwen_temperature: float,
     qwen_debug_dump: bool,
     qwen_thinking_mode: bool,
+    qwen_thinking_max_new_tokens: int | None,
     save_viz: bool,
     viz_dir: Path | None,
     predictions: list[dict[str, Any]],
@@ -371,6 +374,7 @@ def _process_single_sample(
         qwen_temperature=qwen_temperature,
         qwen_debug_dump=qwen_debug_dump,
         qwen_thinking_mode=qwen_thinking_mode,
+        qwen_thinking_max_new_tokens=qwen_thinking_max_new_tokens,
     )
 
     ground_truth.append(_ground_truth_record(image_path, target))
@@ -434,6 +438,10 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         "--qwen-thinking-mode/--no-qwen-thinking-mode",
         help="Enable Qwen thinking mode while stripping thinking traces before parsing.",
     ),
+    qwen_thinking_max_new_tokens: int | None = typer.Option(
+        None,
+        help="Optional token budget for Qwen thinking before final-answer generation.",
+    ),
     save_results: bool = typer.Option(
         True,
         "--save-results/--no-save-results",
@@ -449,6 +457,8 @@ def run_task2_support_strategy_baseline(  # noqa: C901
         raise typer.BadParameter("Unsupported support split. Use 'val' or 'train'.")
     if limit < 1:
         raise typer.BadParameter("--limit must be at least 1.")
+    if qwen_thinking_max_new_tokens is not None and qwen_thinking_max_new_tokens < 1:
+        raise typer.BadParameter("--qwen-thinking-max-new-tokens must be at least 1 when provided.")
 
     requested_categories = _extract_query_categories(category_names.split(","))
     if not requested_categories:
@@ -564,6 +574,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
                         return_debug_outputs=False,
                         system_prompt=system_prompt,
                         thinking_mode=qwen_thinking_mode,
+                        thinking_max_new_tokens=qwen_thinking_max_new_tokens,
                     )
 
                     _append_eval(
@@ -697,6 +708,10 @@ def run_task1_baseline(
         "--qwen-thinking-mode/--no-qwen-thinking-mode",
         help="Enable Qwen thinking mode while stripping thinking traces before parsing.",
     ),
+    qwen_thinking_max_new_tokens: int | None = typer.Option(
+        None,
+        help="Optional token budget for Qwen thinking before final-answer generation.",
+    ),
     qwen_debug_dump: bool = typer.Option(
         False,
         "--qwen-debug-dump/--no-qwen-debug-dump",
@@ -714,6 +729,8 @@ def run_task1_baseline(
     normalized_split = split.strip().lower()
     if normalized_split not in {"val", "train"}:
         raise typer.BadParameter("Unsupported split. Use 'val' or 'train'.")
+    if qwen_thinking_max_new_tokens is not None and qwen_thinking_max_new_tokens < 1:
+        raise typer.BadParameter("--qwen-thinking-max-new-tokens must be at least 1 when provided.")
 
     dataset = Task1DetectionDataset(split=normalized_split, to_float=True)
     data_loader = DataLoader(dataset, batch_size=1, collate_fn=task1_collate_fn)
@@ -755,6 +772,7 @@ def run_task1_baseline(
             qwen_temperature=qwen_temperature,
             qwen_debug_dump=qwen_debug_dump,
             qwen_thinking_mode=qwen_thinking_mode,
+            qwen_thinking_max_new_tokens=qwen_thinking_max_new_tokens,
             save_viz=save_viz,
             viz_dir=viz_dir,
             predictions=predictions,

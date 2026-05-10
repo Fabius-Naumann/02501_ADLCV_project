@@ -226,14 +226,22 @@ class QwenGenerationResult:
     raw_output_text: str
     thinking_text: str
     thinking_mode: bool
+    assistant_prefill: str = ""
+    thinking_max_new_tokens: int | None = None
+    fallback_raw_output_text: str = ""
+    fallback_parser_input_text: str = ""
 
-    def debug_payload(self) -> dict[str, str | bool]:
+    def debug_payload(self) -> dict[str, str | bool | int | None]:
         """Return serializable generation debug fields."""
         return {
             "raw_output_text": self.raw_output_text,
             "parser_input_text": self.output_text,
             "thinking_text": self.thinking_text,
             "thinking_mode": self.thinking_mode,
+            "assistant_prefill": self.assistant_prefill,
+            "thinking_max_new_tokens": self.thinking_max_new_tokens,
+            "fallback_raw_output_text": self.fallback_raw_output_text,
+            "fallback_parser_input_text": self.fallback_parser_input_text,
         }
 
 
@@ -253,10 +261,7 @@ class QwenVLMHandler:
     )
     _SYSTEM_PROMPT_VISUAL_DESCRIPTION = (
         "You are a helpful assistant for visual attribute extraction from support examples. "
-        "You will be shown one or more support images where the relevant objects are highlighted with red boxes. "
-        "Describe the boxed objects using concise, visually distinguishing traits only. "
-        "Focus on appearance, shape, parts, texture and material that help someone find the same or similar "
-        "object in another image. Do not describe the whole image. Do not mention coordinates or the red box."
+        "Return only concise, transferable object descriptions."
     )
     _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
@@ -366,35 +371,90 @@ class QwenVLMHandler:
             "Prefer high precision over high recall."
         )
 
-    def _build_description_prompt(self, category_name: str) -> str:
-        """Build a prompt that asks for a support-conditioned visual description."""
+    @staticmethod
+    def _boxed_support_layout_instruction(support_image_count: int, support_instance_count: int) -> str:
+        """Describe how boxed support examples are laid out for the VLM."""
+        if support_image_count <= 1 and support_instance_count <= 1:
+            return (
+                "The image contains one support example. Use it to infer a likely generic object name, but avoid "
+                "overfitting to incidental details from that single example. "
+            )
+        if support_image_count <= 1:
+            return (
+                f"The image contains one support image with {support_instance_count} red-boxed target instances. "
+                "Compare the marked instances and describe their shared object traits. "
+            )
         return (
-            f"The red box shows an example of '{category_name}'. "
-            "Write a short description of the boxed object using only visually distinguishing traits. "
-            "Keep it to one or two sentences. Mention appearance, shape, material, parts, and local context if useful. "
-            "Do not mention the class name unless it is necessary to avoid ambiguity."
+            f"The image is a left-to-right collage of {support_image_count} source support images containing "
+            f"{support_instance_count} red-boxed target instances total. Do not treat the collage as one scene or "
+            "one object. Compare all marked instances and describe the shared traits that are useful for finding "
+            "new instances. "
         )
 
-    def _build_crop_description_prompt(self, category_name: str) -> str:
-        """Build a prompt that asks for a support-conditioned visual description."""
+    @staticmethod
+    def _cropped_support_layout_instruction(support_image_count: int, support_instance_count: int) -> str:
+        """Describe how cropped support examples are laid out for the VLM."""
+        if support_instance_count <= 1:
+            return (
+                "The image contains one tightly cropped support example. Use it to infer a likely generic object "
+                "name, but avoid overfitting to incidental details from that single example. "
+            )
+        source_note = (
+            f" These crops come from {support_image_count} source support image(s)."
+            if support_image_count != support_instance_count
+            else ""
+        )
         return (
-            f"Describe the visual attributes of the {category_name} in these images. "
-            "Write a short description of the boxed object using only visually distinguishing traits. "
-            "Keep it to one or two sentences. Mention appearance, shape, material, and parts if useful. "
-            "Do not mention the class name unless it is necessary to avoid ambiguity."
+            f"The image is a left-to-right collage of {support_instance_count} separate tightly cropped target "
+            f"instances of the same object.{source_note} Compare all crops and describe the shared traits that are "
+            "useful for finding new instances. "
+        )
+
+    def _build_description_prompt(self, support_image_count: int = 1, support_instance_count: int | None = None) -> str:
+        """Build a prompt that asks for a support-conditioned visual description."""
+        support_instance_count = support_instance_count or support_image_count
+        return (
+            f"{self._boxed_support_layout_instruction(support_image_count, support_instance_count)}"
+            "Red boxes mark the target object in each support example. "
+            "Write one compact object-level visual description that would help find matching instances in a new image. "
+            "Start with a short generic object name inferred from appearance, then add the most useful reusable "
+            "visual traits of the target object itself: overall shape, visible parts, material, texture, color, "
+            "and distinctive structure. "
+            "Do not include details that appear in only one support unless they seem essential to the object type. "
+            "Do not describe the surrounding scene, mounting surface, position in the image, exact background, "
+            "red box, or support-image context. Return one short sentence only, with no bullets or analysis."
+        )
+
+    def _build_crop_description_prompt(
+        self,
+        support_image_count: int = 1,
+        support_instance_count: int | None = None,
+    ) -> str:
+        """Build a prompt that asks for a support-conditioned visual description."""
+        support_instance_count = support_instance_count or support_image_count
+        return (
+            f"{self._cropped_support_layout_instruction(support_image_count, support_instance_count)}"
+            "Each support example is cropped tightly around the target object. "
+            "Write one compact object-level visual description that would help find matching instances in a new image. "
+            "Start with a short generic object name inferred from appearance, then add the most useful reusable "
+            "visual traits of the target object itself: overall shape, visible parts, material, texture, color, "
+            "and distinctive structure. "
+            "Do not include details that appear in only one support unless they seem essential to the object type. "
+            "Return one short sentence only, with no bullets or analysis."
         )
 
     def _build_description_detection_prompt(
         self,
         description: str,
-        output_label: str,
         max_detections: int,
     ) -> str:
         """Build a detection prompt from a generated support description."""
         return (
-            "Detect objects in this image that match the following support-derived description: "
+            "Detect objects in this image whose object-level appearance matches this visual description: "
             f"{description.strip()} "
-            f"Set each detection 'label' field to '{output_label}'. "
+            "Use the description as a transferable visual guide, not as a strict requirement for identical background, "
+            "mounting surface, lighting, viewpoint, color shade, pose, or local context. "
+            "Set each detection 'label' field to 'target_object'. "
             f"Return at most {max_detections} detection(s). "
             "Prefer high precision over high recall."
         )
@@ -488,6 +548,13 @@ class QwenVLMHandler:
     def _split_thinking_output(generated_text: str) -> tuple[str, str]:
         """Split Qwen thinking traces from the final parser-visible output."""
         stripped_text = generated_text.strip()
+        final_match = re.search(r"<(?:answer|final)>(.*?)</(?:answer|final)>", stripped_text, flags=re.DOTALL)
+        if final_match is not None:
+            output_text = final_match.group(1).strip()
+            thinking_text = stripped_text[: final_match.start()].strip()
+            thinking_text = thinking_text.replace("<think>", "").replace("</think>", "").strip()
+            return output_text, thinking_text
+
         if "</think>" in stripped_text:
             thinking_text, output_text = stripped_text.rsplit("</think>", maxsplit=1)
             thinking_text = thinking_text.replace("<think>", "").strip()
@@ -504,11 +571,50 @@ class QwenVLMHandler:
         return output_text.strip(), "\n\n".join(thinking_parts)
 
     @staticmethod
+    def _clean_generated_text(generated_text: str) -> str:
+        """Remove chat terminators while preserving thinking delimiters."""
+        output_text = generated_text.strip()
+        for special_token in ("<|im_start|>assistant", "<|im_end|>", "<|endoftext|>", "<|end|>"):
+            output_text = output_text.replace(special_token, "")
+        return output_text.strip()
+
+    @staticmethod
+    def _extract_assistant_prefill(text_prompt: str) -> str:
+        """Extract assistant prefill tokens inserted by the chat template."""
+        assistant_marker = "<|im_start|>assistant\n"
+        if assistant_marker not in text_prompt:
+            return ""
+        prefill = text_prompt.rsplit(assistant_marker, maxsplit=1)[-1]
+        return prefill if "<|im_end|>" not in prefill else ""
+
+    @staticmethod
+    def _close_unfinished_thinking(raw_output_text: str) -> str:
+        """Return a continuation suffix that closes an unfinished thinking block."""
+        if "<think>" not in raw_output_text or "</think>" in raw_output_text:
+            return ""
+        return "\n</think>\n\n"
+
+    @staticmethod
+    def _looks_like_unmarked_thinking(generated_text: str) -> bool:
+        """Detect reasoning-style output that arrived without thinking delimiters."""
+        stripped_text = generated_text.lstrip()
+        lower_text = stripped_text.lower()
+        if lower_text.startswith(("the user wants", "i need to", "let me", "let's", "we need to")):
+            return True
+        return bool(
+            re.search(
+                r"\n\s*\d+\.\s+\*\*(?:identify|locate|analyze|scan|re-evaluating|re-evaluate)",
+                stripped_text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _with_thinking_instruction(system_prompt: str, thinking_mode: bool) -> str:
         """Add a plain-language thinking instruction for template fallbacks."""
         if thinking_mode:
             return (
-                f"{system_prompt} You may use a <think> block for private reasoning, but after it return only the "
+                f"{system_prompt} Put any reasoning only inside <think>...</think>. After </think>, return only the "
                 "requested final answer."
             )
         return f"{system_prompt} Do not include internal reasoning, chain-of-thought, or <think> blocks in the answer."
@@ -557,6 +663,7 @@ class QwenVLMHandler:
         system_prompt: str | None = None,
         image_pils: list[Image.Image] | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> str:
         """Run one image-text generation step with chat-template fallback."""
         return self._generate_text_result(
@@ -567,7 +674,75 @@ class QwenVLMHandler:
             system_prompt=system_prompt,
             image_pils=image_pils,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         ).output_text
+
+    def _generate_text_with_thinking_budget(
+        self,
+        text_prompt: str,
+        inputs: dict[str, torch.Tensor],
+        images: list[Image.Image],
+        assistant_prefill: str,
+        generation_kwargs: dict[str, Any],
+        thinking_max_new_tokens: int,
+    ) -> QwenGenerationResult:
+        """Generate thinking with its own budget, then continue with a final-answer budget."""
+        thinking_generation_kwargs = {
+            **generation_kwargs,
+            "max_new_tokens": thinking_max_new_tokens,
+        }
+        with torch.no_grad():
+            thinking_generated_ids = self.model.generate(**inputs, **thinking_generation_kwargs)
+
+        if "input_ids" in inputs:
+            prompt_length = inputs["input_ids"].shape[-1]
+            thinking_generated_ids = thinking_generated_ids[:, prompt_length:]
+
+        thinking_generated_text = self.processor.batch_decode(
+            thinking_generated_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        partial_raw_output_text = self._clean_generated_text(f"{assistant_prefill}{thinking_generated_text}")
+        partial_output_text, partial_thinking_text = self._split_thinking_output(partial_raw_output_text)
+        if partial_output_text:
+            return QwenGenerationResult(
+                output_text=partial_output_text,
+                raw_output_text=partial_raw_output_text,
+                thinking_text=partial_thinking_text,
+                thinking_mode=True,
+                assistant_prefill=assistant_prefill,
+                thinking_max_new_tokens=thinking_max_new_tokens,
+            )
+
+        forced_thinking_close = self._close_unfinished_thinking(partial_raw_output_text)
+        continuation_prompt = f"{text_prompt}{thinking_generated_text}{forced_thinking_close}"
+        continuation_inputs = self.processor(text=[continuation_prompt], images=images, return_tensors="pt")
+        continuation_inputs = {key: value.to(self.device) for key, value in continuation_inputs.items()}
+        with torch.no_grad():
+            answer_generated_ids = self.model.generate(**continuation_inputs, **generation_kwargs)
+
+        if "input_ids" in continuation_inputs:
+            prompt_length = continuation_inputs["input_ids"].shape[-1]
+            answer_generated_ids = answer_generated_ids[:, prompt_length:]
+
+        answer_generated_text = self.processor.batch_decode(
+            answer_generated_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        raw_output_text = self._clean_generated_text(
+            f"{assistant_prefill}{thinking_generated_text}{forced_thinking_close}{answer_generated_text}"
+        )
+        output_text, thinking_text = self._split_thinking_output(raw_output_text)
+        return QwenGenerationResult(
+            output_text=output_text,
+            raw_output_text=raw_output_text,
+            thinking_text=thinking_text or partial_thinking_text or partial_raw_output_text,
+            thinking_mode=True,
+            assistant_prefill=assistant_prefill,
+            thinking_max_new_tokens=thinking_max_new_tokens,
+        )
 
     def _generate_text_result(
         self,
@@ -578,12 +753,14 @@ class QwenVLMHandler:
         system_prompt: str | None = None,
         image_pils: list[Image.Image] | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> QwenGenerationResult:
         """Run one image-text generation step and preserve raw thinking traces."""
         resolved_system_prompt = self._with_thinking_instruction(
             system_prompt=system_prompt or self._SYSTEM_PROMPT_OBJECT_DETECTION,
             thinking_mode=thinking_mode,
         )
+        assistant_prefill = ""
         used_chat_template = False
         images = image_pils if image_pils is not None else ([image_pil] if image_pil is not None else [])
         if not images:
@@ -608,6 +785,7 @@ class QwenVLMHandler:
                 add_generation_prompt=True,
                 enable_thinking=thinking_mode,
             )
+            assistant_prefill = self._extract_assistant_prefill(text_prompt)
             inputs = self.processor(text=[text_prompt], images=images, return_tensors="pt")
             used_chat_template = True
         except (AttributeError, TypeError, ValueError):
@@ -623,6 +801,16 @@ class QwenVLMHandler:
         if do_sample:
             generation_kwargs["temperature"] = temperature
 
+        if thinking_mode and thinking_max_new_tokens is not None and assistant_prefill.startswith("<think>"):
+            return self._generate_text_with_thinking_budget(
+                text_prompt=text_prompt,
+                inputs=inputs,
+                images=images,
+                assistant_prefill=assistant_prefill,
+                generation_kwargs=generation_kwargs,
+                thinking_max_new_tokens=thinking_max_new_tokens,
+            )
+
         with torch.no_grad():
             generated_ids = self.model.generate(**inputs, **generation_kwargs)
 
@@ -632,16 +820,42 @@ class QwenVLMHandler:
 
         generated_text = self.processor.batch_decode(
             generated_ids,
-            skip_special_tokens=True,
+            skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )[0]
-        raw_output_text = generated_text.strip()
+        generated_text_prefix = assistant_prefill if thinking_mode else ""
+        raw_output_text = self._clean_generated_text(f"{generated_text_prefix}{generated_text}")
         output_text, thinking_text = self._split_thinking_output(raw_output_text)
+        if thinking_mode and not thinking_text and self._looks_like_unmarked_thinking(output_text):
+            thinking_text = output_text
+            output_text = ""
+        if thinking_mode and not output_text:
+            fallback_result = self._generate_text_result(
+                image_pil=image_pil,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                image_pils=image_pils,
+                thinking_mode=False,
+            )
+            return QwenGenerationResult(
+                output_text=fallback_result.output_text,
+                raw_output_text=raw_output_text,
+                thinking_text=thinking_text or raw_output_text,
+                thinking_mode=thinking_mode,
+                assistant_prefill=assistant_prefill,
+                thinking_max_new_tokens=thinking_max_new_tokens,
+                fallback_raw_output_text=fallback_result.raw_output_text,
+                fallback_parser_input_text=fallback_result.output_text,
+            )
         return QwenGenerationResult(
             output_text=output_text,
             raw_output_text=raw_output_text,
             thinking_text=thinking_text,
             thinking_mode=thinking_mode,
+            assistant_prefill=assistant_prefill,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
 
     @staticmethod
@@ -711,6 +925,7 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Run prompt-based localization for a list of categories.
 
@@ -723,6 +938,7 @@ class QwenVLMHandler:
             return_debug_outputs: Include per-category input/raw/parsed/final debug payload.
             system_prompt: Optional override for the detection system prompt.
             thinking_mode: Enable Qwen thinking mode while stripping thinking traces before parsing.
+            thinking_max_new_tokens: Optional token budget for the thinking phase before final-answer generation.
 
         Returns:
             Dictionary with keys: boxes (cxcywh), scores, labels.
@@ -752,6 +968,7 @@ class QwenVLMHandler:
                 temperature=temperature,
                 system_prompt=system_prompt,
                 thinking_mode=thinking_mode,
+                thinking_max_new_tokens=thinking_max_new_tokens,
             )
             generated_text = generation_result.output_text
             parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
@@ -808,6 +1025,11 @@ class QwenVLMHandler:
         temperature: float = 0.0,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
+        cropped_support: bool = False,
+        support_count: int | None = None,
+        support_image_count: int = 1,
+        support_instance_count: int | None = None,
     ) -> str:
         """Generate a concise visual description from a support example image."""
         description, _ = self.generate_support_description_debug(
@@ -817,6 +1039,11 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
+            cropped_support=cropped_support,
+            support_count=support_count,
+            support_image_count=support_image_count,
+            support_instance_count=support_instance_count,
         )
         return description
 
@@ -828,9 +1055,27 @@ class QwenVLMHandler:
         temperature: float = 0.0,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
+        cropped_support: bool = False,
+        support_count: int | None = None,
+        support_image_count: int = 1,
+        support_instance_count: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Generate a visual support description with raw generation debug fields."""
-        prompt = self._build_description_prompt(category_name=category_name)
+        if support_count is not None:
+            support_image_count = support_count
+        support_instance_count = support_instance_count or support_image_count
+        prompt = (
+            self._build_crop_description_prompt(
+                support_image_count=support_image_count,
+                support_instance_count=support_instance_count,
+            )
+            if cropped_support
+            else self._build_description_prompt(
+                support_image_count=support_image_count,
+                support_instance_count=support_instance_count,
+            )
+        )
         generation_result = self._generate_text_result(
             image_pil=support_image,
             prompt=prompt,
@@ -838,10 +1083,15 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt or self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
         description = self._normalize_description(generation_result.output_text)
         return description, {
             "category_name": category_name,
+            "cropped_support": cropped_support,
+            "support_count": support_instance_count,
+            "support_image_count": support_image_count,
+            "support_instance_count": support_instance_count,
             "input_prompt": prompt,
             "normalized_description": description,
             **generation_result.debug_payload(),
@@ -858,6 +1108,7 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Run prompt-based localization using a free-text support description."""
         normalized_description = self._normalize_description(description)
@@ -867,7 +1118,6 @@ class QwenVLMHandler:
 
         prompt = self._build_description_detection_prompt(
             description=normalized_description,
-            output_label=output_label,
             max_detections=max_detections,
         )
         generation_result = self._generate_text_result(
@@ -877,6 +1127,7 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
         generated_text = generation_result.output_text
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
@@ -978,18 +1229,21 @@ class QwenVLMHandler:
         max_new_tokens: int = 128,
         temperature: float = 0.0,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> str:
         """Generate a visual description specifically from cropped support examples."""
+        del category_name  # Currently unused in the prompt, but could be integrated for more specific descriptions.
 
         # We leverage the internal _generate_text helper which handles
         # the processor, device routing, and token slicing automatically.
         raw_description = self._generate_text(
             image_pil=support_image,
-            prompt=self._build_crop_description_prompt(category_name=category_name),
+            prompt=self._build_crop_description_prompt(),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             system_prompt=self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
 
         # Clean up conversational fillers (e.g., "The image shows...")
@@ -1008,6 +1262,7 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Detect query objects directly from a support-query panel without text-from-vision."""
         normalized_category_name = category_name.strip()
@@ -1032,6 +1287,7 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=resolved_system_prompt,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
         generated_text = generation_result.output_text
         parsed_detections, parse_metadata = self._parse_generated_output(generated_text)
@@ -1078,6 +1334,7 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Detect query objects using a support panel and separate query image.
 
@@ -1093,6 +1350,7 @@ class QwenVLMHandler:
             return_debug_outputs: Whether to return debug information.
             system_prompt: Optional system prompt override.
             thinking_mode: Enable Qwen thinking mode while stripping thinking traces before parsing.
+            thinking_max_new_tokens: Optional token budget for the thinking phase before final-answer generation.
 
         Returns:
             Dictionary with boxes (cxcywh), scores, and labels.
@@ -1118,6 +1376,7 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
         generated_text = generation_result.output_text
 
@@ -1167,6 +1426,7 @@ class QwenVLMHandler:
         return_debug_outputs: bool = False,
         system_prompt: str | None = None,
         thinking_mode: bool = False,
+        thinking_max_new_tokens: int | None = None,
     ) -> dict[str, Tensor | list[str] | list[dict[str, Any]]]:
         """Detect query objects using separate support and query images.
 
@@ -1182,6 +1442,7 @@ class QwenVLMHandler:
             return_debug_outputs: Whether to return debug information.
             system_prompt: Optional system prompt override.
             thinking_mode: Enable Qwen thinking mode while stripping thinking traces before parsing.
+            thinking_max_new_tokens: Optional token budget for the thinking phase before final-answer generation.
 
         Returns:
             Dictionary with boxes (cxcywh), scores, and labels.
@@ -1236,6 +1497,7 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
             thinking_mode=thinking_mode,
+            thinking_max_new_tokens=thinking_max_new_tokens,
         )
         generated_text = generation_result.output_text
 
