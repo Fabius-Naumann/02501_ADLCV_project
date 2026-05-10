@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import random
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,14 @@ from detgpt.support_samples import (
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
+
+FIXED_5_CLASSES = [
+    "oil_lamp",
+    "gravy_boat",
+    "quiche",
+    "knocker_(on_a_door)",
+    "mail_slot",
+]
 
 
 def _resolve_detector(
@@ -291,6 +301,7 @@ def _ground_truth_record_for_category(
         for index, label in enumerate(target["category_names"])
         if str(label).casefold() == category_name.casefold()
     ]
+
     return {
         "image_path": image_path,
         "boxes": category_boxes,
@@ -325,6 +336,145 @@ def _save_task2_results(
 
     logger.info("Saved Task 2 metrics to {}", metrics_path)
     logger.info("Saved Task 2 summary to {}", summary_path)
+
+
+def _sample_balanced_indices(
+    dataset: Task1DetectionDataset,
+    samples_per_class: int,
+    seed: int,
+    limit: int,
+) -> list[int]:
+    rng = random.Random(seed)
+
+    per_class: dict[str, list[int]] = defaultdict(list)
+
+    for index, sample in enumerate(dataset.samples):
+        classes = {
+            str(annotation.get("category_name", "")).strip()
+            for annotation in sample.get("annotations", [])
+            if str(annotation.get("category_name", "")).strip()
+        }
+
+        for class_name in classes:
+            per_class[class_name].append(index)
+
+    selected_indices: list[int] = []
+    used_indices: set[int] = set()
+
+    class_names = sorted(per_class)
+    logger.info("Balanced sampling over {} classes: {}", len(class_names), class_names)
+
+    for class_name in class_names:
+        candidate_indices = per_class[class_name][:]
+        rng.shuffle(candidate_indices)
+
+        added_for_class = 0
+        for index in candidate_indices:
+            if index in used_indices:
+                continue
+
+            selected_indices.append(index)
+            used_indices.add(index)
+            added_for_class += 1
+
+            if added_for_class >= samples_per_class:
+                break
+
+        logger.info(
+            "Selected {} unique images for class '{}' from {} candidates.",
+            added_for_class,
+            class_name,
+            len(candidate_indices),
+        )
+
+    rng.shuffle(selected_indices)
+
+    if limit > 0:
+        selected_indices = selected_indices[:limit]
+
+    logger.info("Balanced selected image count: {}", len(selected_indices))
+    return selected_indices
+
+
+def _sequential_indices(dataset: Task1DetectionDataset, limit: int) -> list[int]:
+    max_count = len(dataset) if limit <= 0 else min(limit, len(dataset))
+    return list(range(max_count))
+
+
+def _resolve_task1_categories(category_names: str) -> list[str]:
+    requested = _extract_query_categories(category_names.split(","))
+    return requested or FIXED_5_CLASSES
+
+
+def _filter_ground_truth_to_categories(
+    image_path: str,
+    target: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    boxes: list[list[float]] = []
+    labels: list[str] = []
+
+    for box, label in zip(target["boxes"], target["category_names"], strict=True):
+        label_text = str(label)
+        if label_text.casefold() not in allowed:
+            continue
+        boxes.append(box.detach().cpu().tolist())
+        labels.append(label_text)
+
+    return {"image_path": image_path, "boxes": boxes, "labels": labels}
+
+
+def _filter_detections_to_categories(
+    detections: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    labels = [str(label) for label in detections["labels"]]
+    keep_indices = [index for index, label in enumerate(labels) if label.casefold() in allowed]
+
+    if not keep_indices:
+        return _empty_detections()
+
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+    filtered = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": detections["scores"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        filtered["debug_entries"] = detections["debug_entries"]
+
+    return filtered
+
+
+def _limit_detections_per_class(detections: dict[str, Any], max_per_class: int) -> dict[str, Any]:
+    if max_per_class <= 0 or len(detections["boxes"]) == 0:
+        return detections
+
+    labels = [str(label) for label in detections["labels"]]
+    scores = detections["scores"].detach().cpu().to(torch.float32)
+    keep_indices: list[int] = []
+
+    for label in sorted(set(labels)):
+        label_indices = [index for index, value in enumerate(labels) if value == label]
+        label_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+        keep_indices.extend(label_indices[:max_per_class])
+
+    keep_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+
+    limited = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": scores.index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        limited["debug_entries"] = detections["debug_entries"]
+
+    return limited
 
 
 def _process_single_sample(

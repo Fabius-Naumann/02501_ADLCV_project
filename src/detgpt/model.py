@@ -226,8 +226,8 @@ class QwenVLMHandler:
     )
     _TASK2_OBJECT_DETECTION_BOUNDED_BOXES = (
         "You are a helpful assistant to detect objects in images in a few-shot setting. "
-        "You will be provided with support example images where the relevant objects "
-        "are highlighted with red bounding boxes. "
+        "You will be provided with support example images where the relevant objects are "
+        "highlighted with red bounding boxes. "
         "Use these examples to understand what the target object looks like, then apply this knowledge "
         "to detect similar objects in the query image. "
         "When asked to detect elements based on a description, return ONLY valid JSON. "
@@ -339,7 +339,7 @@ class QwenVLMHandler:
             "Keep it to one or two sentences. Mention appearance, shape, material, parts, and local context if useful. "
             "Do not mention the class name unless it is necessary to avoid ambiguity."
         )
-    
+
     def _build_crop_description_prompt(self, category_name: str) -> str:
         """Build a prompt that asks for a support-conditioned visual description."""
         return (
@@ -837,7 +837,7 @@ class QwenVLMHandler:
 
             # Return the winning token
             return "A" if a_score > b_score else "B"
-        
+
     def generate_crop_support_description(
         self,
         support_image: Image.Image,
@@ -846,8 +846,8 @@ class QwenVLMHandler:
         temperature: float = 0.0,
     ) -> str:
         """Generate a visual description specifically from cropped support examples."""
-        
-        # We leverage the internal _generate_text helper which handles 
+
+        # We leverage the internal _generate_text helper which handles
         # the processor, device routing, and token slicing automatically.
         raw_description = self._generate_text(
             image_pil=support_image,
@@ -856,8 +856,8 @@ class QwenVLMHandler:
             temperature=temperature,
             system_prompt=self._SYSTEM_PROMPT_VISUAL_DESCRIPTION,
         )
-        
-        # Clean up conversational fillers (e.g., "The image shows...") 
+
+        # Clean up conversational fillers (e.g., "The image shows...")
         # to provide a clean string for Grounding DINO.
         return self._normalize_description(raw_description)
 
@@ -976,7 +976,7 @@ class QwenVLMHandler:
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         )
 
         # Parse output
@@ -1090,7 +1090,7 @@ class QwenVLMHandler:
             prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
-            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_SYSTEM_PROMPT,
+            system_prompt=system_prompt or self._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         )
 
         # Parse output
