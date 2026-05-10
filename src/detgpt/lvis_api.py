@@ -52,6 +52,102 @@ def default_manifest_path(dataset_type: str) -> Path:
     return PROCESSED_DIR / f"lvis_v1_{normalized_split}_manifest.json"
 
 
+def _load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
+    """Load an existing manifest if it exists.
+
+    Args:
+        manifest_path: Path to the manifest JSON file.
+
+    Returns:
+        Existing manifest entries, or an empty list when the file is missing.
+
+    Raises:
+        ValueError: If the manifest file does not contain a JSON list.
+    """
+    if not manifest_path.exists():
+        return []
+
+    with manifest_path.open("r", encoding="utf-8") as file_handle:
+        manifest = json.load(file_handle)
+
+    if not isinstance(manifest, list):
+        raise ValueError(f"Expected manifest list in {manifest_path}.")
+    return manifest
+
+
+def _merge_annotations(
+    existing_annotations: list[dict[str, Any]],
+    new_annotations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge annotation records while preserving order.
+
+    Args:
+        existing_annotations: Annotation records already present in the manifest.
+        new_annotations: Annotation records from the current preparation run.
+
+    Returns:
+        Deduplicated annotation records.
+    """
+    merged_annotations = [*existing_annotations]
+    annotation_indices = {
+        annotation["annotation_id"]: index
+        for index, annotation in enumerate(existing_annotations)
+        if "annotation_id" in annotation
+    }
+
+    for annotation in new_annotations:
+        annotation_id = annotation.get("annotation_id")
+        if annotation_id is not None and annotation_id in annotation_indices:
+            merged_annotations[annotation_indices[annotation_id]] = annotation
+            continue
+        merged_annotations.append(annotation)
+        if annotation_id is not None:
+            annotation_indices[annotation_id] = len(merged_annotations) - 1
+
+    return merged_annotations
+
+
+def merge_manifest_entries(
+    existing_manifest: list[dict[str, Any]],
+    new_manifest: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expand a manifest with new entries without dropping existing samples.
+
+    Args:
+        existing_manifest: Manifest entries loaded from disk.
+        new_manifest: Manifest entries built for the current run.
+
+    Returns:
+        Merged manifest entries. Existing image order is preserved and new image
+        IDs are appended in current-run order.
+    """
+    merged_by_image_id: dict[int, dict[str, Any]] = {}
+    image_id_order: list[int] = []
+
+    for entry in existing_manifest:
+        image_id = int(entry["image_id"])
+        if image_id not in merged_by_image_id:
+            image_id_order.append(image_id)
+        merged_by_image_id[image_id] = entry
+
+    for entry in new_manifest:
+        image_id = int(entry["image_id"])
+        if image_id not in merged_by_image_id:
+            merged_by_image_id[image_id] = entry
+            image_id_order.append(image_id)
+            continue
+
+        existing_entry = merged_by_image_id[image_id]
+        annotations = _merge_annotations(
+            existing_entry.get("annotations", []),
+            entry.get("annotations", []),
+        )
+        merged_entry = {**existing_entry, **entry, "annotations": annotations, "num_annotations": len(annotations)}
+        merged_by_image_id[image_id] = merged_entry
+
+    return [merged_by_image_id[image_id] for image_id in image_id_order]
+
+
 class LvisAPI(LVIS):
     """Extended LVIS API with setup and safe download utilities."""
 
@@ -407,11 +503,20 @@ def prepare_dataset(
         annotation_category_filter = (
             requested_category_ids if include_only_requested_category_annotations and requested_category_ids else None
         )
-        manifest = api.build_manifest(image_ids, allowed_category_ids=annotation_category_filter)
         manifest_path = PROCESSED_DIR / f"lvis_v1_{split}_manifest.json"
+        existing_manifest = _load_manifest(manifest_path)
+        new_manifest = api.build_manifest(image_ids, allowed_category_ids=annotation_category_filter)
+        manifest = merge_manifest_entries(existing_manifest, new_manifest)
         with manifest_path.open("w", encoding="utf-8") as file_handle:
             json.dump(manifest, file_handle, indent=2)
-        logger.info("[{}] wrote manifest with {} entries to {}", split, len(manifest), manifest_path)
+        logger.info(
+            "[{}] wrote manifest with {} entries to {} ({} new/updated, {} existing)",
+            split,
+            len(manifest),
+            manifest_path,
+            len(new_manifest),
+            len(existing_manifest),
+        )
 
 
 def _prepare_dataset_cli(
