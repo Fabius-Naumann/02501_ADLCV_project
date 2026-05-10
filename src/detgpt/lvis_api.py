@@ -88,10 +88,20 @@ def _merge_annotations(
     Returns:
         Deduplicated annotation records.
     """
-    merged_annotations = [*existing_annotations]
+    seen_ids: set[int] = set()
+    deduplicated_existing = []
+    for annotation in existing_annotations:
+        annotation_id = annotation.get("annotation_id")
+        if annotation_id is not None and annotation_id in seen_ids:
+            continue
+        deduplicated_existing.append(annotation)
+        if annotation_id is not None:
+            seen_ids.add(annotation_id)
+
+    merged_annotations = [*deduplicated_existing]
     annotation_indices = {
         annotation["annotation_id"]: index
-        for index, annotation in enumerate(existing_annotations)
+        for index, annotation in enumerate(deduplicated_existing)
         if "annotation_id" in annotation
     }
 

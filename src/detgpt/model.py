@@ -412,7 +412,7 @@ class QwenVLMHandler:
 
     def _build_description_prompt(self, support_image_count: int = 1, support_instance_count: int | None = None) -> str:
         """Build a prompt that asks for a support-conditioned visual description."""
-        support_instance_count = support_instance_count or support_image_count
+        support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
         return (
             f"{self._boxed_support_layout_instruction(support_image_count, support_instance_count)}"
             "Red boxes mark the target object in each support example. "
@@ -431,7 +431,7 @@ class QwenVLMHandler:
         support_instance_count: int | None = None,
     ) -> str:
         """Build a prompt that asks for a support-conditioned visual description."""
-        support_instance_count = support_instance_count or support_image_count
+        support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
         return (
             f"{self._cropped_support_layout_instruction(support_image_count, support_instance_count)}"
             "Each support example is cropped tightly around the target object. "
@@ -1064,7 +1064,7 @@ class QwenVLMHandler:
         """Generate a visual support description with raw generation debug fields."""
         if support_count is not None:
             support_image_count = support_count
-        support_instance_count = support_instance_count or support_image_count
+        support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
         prompt = (
             self._build_crop_description_prompt(
                 support_image_count=support_image_count,
@@ -1089,7 +1089,7 @@ class QwenVLMHandler:
         return description, {
             "category_name": category_name,
             "cropped_support": cropped_support,
-            "support_count": support_instance_count,
+            "support_count": support_count or support_image_count,
             "support_image_count": support_image_count,
             "support_instance_count": support_instance_count,
             "input_prompt": prompt,
