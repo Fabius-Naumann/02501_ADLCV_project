@@ -41,3 +41,13 @@ Sofia
 Alexandra
 - [ ] evaluate fusion variants against Grounding DINO baseline and report mAP deltas -> Alexandra
 - [ ] compare precision/recall trade-offs and summarize final Task 3 results -> Alexandra
+
+
+final sprint:
+- cropped with context for task3 (task2 [optional])
+- do evaluations of task 3 with all variations that are relevant and should be compared (Qwen3.5 2B/9B, thinking/no-thinking [optional])
+- poster:
+    - show more intermediate steps for task3
+    - finetune fontsize
+    - expand on conclusion
+    - do more bullet points instead of paragraphs

@@ -7,7 +7,7 @@ from loguru import logger
 from torchvision.ops import box_iou
 
 from detgpt import FIGURES_DIR
-from detgpt.box_utils import cxcywh_tensor_to_xyxy
+from detgpt.box_utils import clip_xyxy_to_image, cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset
 from detgpt.device import DeviceSpec, resolve_torch_device
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
@@ -19,7 +19,17 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 
 
-def debug_plot_boxes(image_tensor, boxes, category, save_path, scores=None, color="blue", secondary_boxes=None, secondary_color="red", secondary_scores=None):
+def debug_plot_boxes(
+    image_tensor,
+    boxes,
+    category,
+    save_path,
+    scores=None,
+    color="blue",
+    secondary_boxes=None,
+    secondary_color="red",
+    secondary_scores=None,
+):
     """Helper to save intermediate bounding box progression."""
     image_np = image_tensor.permute(1, 2, 0).cpu().numpy()
     fig, ax = plt.subplots(figsize=(12, 12))
@@ -28,14 +38,26 @@ def debug_plot_boxes(image_tensor, boxes, category, save_path, scores=None, colo
     if secondary_boxes is not None:
         for i, box in enumerate(secondary_boxes):
             x1, y1, x2, y2 = box.cpu().numpy()
-            rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=1, edgecolor=secondary_color, facecolor="none", linestyle="--", alpha=0.5)
+            rect = patches.Rectangle(
+                (x1, y1),
+                x2 - x1,
+                y2 - y1,
+                linewidth=1,
+                edgecolor=secondary_color,
+                facecolor="none",
+                linestyle="--",
+                alpha=0.5,
+            )
             ax.add_patch(rect)
-            
+
             if secondary_scores is not None:
                 ax.text(
-                    x1, y2 + 15, f"{secondary_scores[i]:.2f}",
-                    color="black", fontsize=8,
-                    bbox={"facecolor": secondary_color, "alpha": 0.5, "edgecolor": "none"}
+                    x1,
+                    y2 + 15,
+                    f"{secondary_scores[i]:.2f}",
+                    color="black",
+                    fontsize=8,
+                    bbox={"facecolor": secondary_color, "alpha": 0.5, "edgecolor": "none"},
                 )
 
     for i, box in enumerate(boxes):
@@ -45,9 +67,13 @@ def debug_plot_boxes(image_tensor, boxes, category, save_path, scores=None, colo
 
         if scores is not None:
             ax.text(
-                x1, y1 - 10, f"{scores[i]:.2f}",
-                color="black", fontsize=10, fontweight="bold",
-                bbox={"facecolor": color, "alpha": 0.8, "edgecolor": "none"}
+                x1,
+                y1 - 10,
+                f"{scores[i]:.2f}",
+                color="black",
+                fontsize=10,
+                fontweight="bold",
+                bbox={"facecolor": color, "alpha": 0.8, "edgecolor": "none"},
             )
 
     plt.title(f"Step Debug: {category} - {len(boxes)} boxes ({color})", fontsize=16)
@@ -83,7 +109,10 @@ def get_support_crops_for_vlm(dataset, category_name, query_index, n_support=3, 
         box_xyxy = cxcywh_tensor_to_xyxy(box).to(dtype=torch.int64)[0]
 
         # Crop and convert
-        x_min, y_min, x_max, y_max = box_xyxy.tolist()
+        _, height, width = image_tensor.shape
+        x_min, y_min, x_max, y_max = clip_xyxy_to_image(box_xyxy, width=width, height=height)
+        if x_max <= x_min or y_max <= y_min:
+            continue
         cropped_tensor = image_tensor[:, y_min:y_max, x_min:x_max]
         crop_pil = TF.to_pil_image(cropped_tensor)
 
@@ -111,9 +140,9 @@ class FusionPipeline:
         crops = []
         _, h, w = image_tensor.shape
         for box in boxes:
-            x1, y1, x2, y2 = box.long()
-            x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
-            x2, y2 = min(w, x2 + padding), min(h, y2 + padding)
+            x1, y1, x2, y2 = clip_xyxy_to_image(box, width=w, height=h, padding=padding)
+            if x2 <= x1 or y2 <= y1:
+                continue
             crops.append(image_tensor[:, y1:y2, x1:x2])
         return crops
 
@@ -139,9 +168,12 @@ class FusionPipeline:
         logger.info(f"Phase 1: DINO found {len(candidates['boxes'])} boxes. Keeping top {len(boxes_to_verify)}.")
         if debug_dir:
             debug_plot_boxes(
-                image_tensor, boxes_to_verify, category, 
-                Path(debug_dir) / f"debug_step1_dino_{category}.png", 
-                scores=candidates["scores"][top_idx], color="blue"
+                image_tensor,
+                boxes_to_verify,
+                category,
+                Path(debug_dir) / f"debug_step1_dino_{category}.png",
+                scores=candidates["scores"][top_idx],
+                color="blue",
             )
 
         # ---------------------------------------------------------
@@ -161,7 +193,10 @@ class FusionPipeline:
         verified_scores = vlm_scores[verified_mask]
         verified_crops = [crops[i] for i in range(len(crops)) if verified_mask[i]]
 
-        logger.info(f"Phase 2: VLM Verification retained {len(verified_boxes)} out of {len(boxes_to_verify)} boxes (Threshold: {conf_threshold}).")
+        logger.info(
+            "Phase 2: VLM Verification retained "
+            f"{len(verified_boxes)} out of {len(boxes_to_verify)} boxes (Threshold: {conf_threshold})."
+        )
         if debug_dir:
             # Boxes that failed verification
             failed_mask = ~verified_mask
@@ -169,10 +204,15 @@ class FusionPipeline:
             failed_scores = vlm_scores[failed_mask]
 
             debug_plot_boxes(
-                image_tensor, verified_boxes, category, 
-                Path(debug_dir) / f"debug_step2_verified_{category}.png", 
-                scores=verified_scores, color="orange",
-                secondary_boxes=failed_boxes, secondary_color="red", secondary_scores=failed_scores
+                image_tensor,
+                verified_boxes,
+                category,
+                Path(debug_dir) / f"debug_step2_verified_{category}.png",
+                scores=verified_scores,
+                color="orange",
+                secondary_boxes=failed_boxes,
+                secondary_color="red",
+                secondary_scores=failed_scores,
             )
 
         # ---------------------------------------------------------
@@ -194,7 +234,9 @@ class FusionPipeline:
             for other_idx in remaining_idxs:
                 # Calculate Overlap
                 iou = box_iou(verified_boxes[current_best].unsqueeze(0), verified_boxes[other_idx].unsqueeze(0)).item()
-                logger.debug(f"Comparing Box {current_best} (IoU={iou:.2f}) with Box {other_idx} for category '{category}'.")
+                logger.debug(
+                    f"Comparing Box {current_best} (IoU={iou:.2f}) with Box {other_idx} for category '{category}'."
+                )
 
                 if iou > iou_threshold:
                     logger.info(f"Overlap detected (IoU={iou:.2f}). Initiating VLM Duel...")
@@ -221,9 +263,12 @@ class FusionPipeline:
         logger.info(f"Phase 3: VLM-NMS completed. Kept {len(final_boxes)} final boxes out of {len(verified_boxes)}.")
         if debug_dir:
             debug_plot_boxes(
-                image_tensor, final_boxes, category, 
-                Path(debug_dir) / f"debug_step3_nms_{category}.png", 
-                scores=final_scores, color="#39FF14"
+                image_tensor,
+                final_boxes,
+                category,
+                Path(debug_dir) / f"debug_step3_nms_{category}.png",
+                scores=final_scores,
+                color="#39FF14",
             )
 
         # Convert keep_indices from verified_boxes space back to boxes_to_verify space
@@ -285,14 +330,17 @@ def visualize_fusion_comparison(image_tensor, all_boxes, final_indices, scores, 
 # --- Execution Block ---
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Run the Fusion Pipeline")
     parser.add_argument("--category", type=str, default="bread", help="The object category to detect.")
-    parser.add_argument("--image-index", type=int, default=None, help="The dataset index to use as query image (Optional).")
+    parser.add_argument(
+        "--image-index", type=int, default=None, help="The dataset index to use as query image (Optional)."
+    )
     args = parser.parse_args()
 
     pipeline = FusionPipeline()
     dataset = Task1DetectionDataset(split="train")
-    
+
     test_cat = args.category
 
     img_idx = args.image_index
@@ -302,7 +350,7 @@ if __name__ == "__main__":
         if not query_indices:
             raise ValueError(f"No images found containing category '{test_cat}' in the dataset.")
         img_idx = query_indices[0]
-    
+
     image, _ = dataset[img_idx]
 
     # Save the raw query image
@@ -321,10 +369,10 @@ if __name__ == "__main__":
     else:
         support_collage_path = FIGURES_DIR / f"support_collage_{img_idx}_{test_cat}.png"
         support_collage = side_by_side(
-            target_img=None, 
-            n_support_img=support_samples, 
+            target_img=None,
+            n_support_img=support_samples,
             support_category_name=test_cat,
-            output_path=support_collage_path
+            output_path=support_collage_path,
         )
         logger.info(f"Saved support collage to {support_collage_path}")
 

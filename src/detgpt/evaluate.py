@@ -19,6 +19,7 @@ from detgpt.data import Task1DetectionDataset, task1_collate_fn
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
 from detgpt.support_samples import (
+    contextual_cropped_side_by_side,
     cropped_side_by_side,
     find_support_indices,
     marked_side_by_side,
@@ -479,6 +480,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     qwen_handler = QwenVLMHandler(model_id=qwen_model_id)
     qwen_task2_detection_system_prompts = {
         "side_by_side": qwen_handler._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
+        "contextual_crops": qwen_handler._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         "cropped_exemplars": qwen_handler._TASK2_OBJECT_DETECTION_CROPPED,
         "set_of_mark_visual": qwen_handler._TASK2_OBJECT_DETECTION_MARKED,
     }
@@ -486,6 +488,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     # Map strategy names to their panel builder functions (target_img=None for support panel only)
     strategy_builders = {
         "side_by_side": side_by_side,
+        "contextual_crops": contextual_cropped_side_by_side,
         "cropped_exemplars": cropped_side_by_side,
         "set_of_mark_visual": marked_side_by_side,
     }

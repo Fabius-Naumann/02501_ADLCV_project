@@ -347,9 +347,7 @@ class QwenVLMHandler:
 
         except OSError as error:
             alternatives = [
-                "Qwen/Qwen2-VL-2B-Instruct",
-                "Qwen/Qwen2.5-VL-3B-Instruct",
-                "Qwen/Qwen2.5-VL-7B-Instruct",
+                "Qwen/Qwen3.5-0.8B",
                 "Qwen/Qwen3.5-2B",
                 "Qwen/Qwen3.5-4B",
                 "Qwen/Qwen3.5-9B",
@@ -410,19 +408,45 @@ class QwenVLMHandler:
             "useful for finding new instances. "
         )
 
+    @staticmethod
+    def _contextual_cropped_support_layout_instruction(
+        support_image_count: int,
+        support_instance_count: int,
+    ) -> str:
+        """Describe how contextual cropped support examples are laid out for the VLM."""
+        if support_instance_count <= 1:
+            return (
+                "The image contains one contextual support crop with the target object marked by a red box. "
+                "Use the surrounding local context only to understand scale, occlusion, and nearby parts, while "
+                "avoiding overfitting to incidental background details from that single example. "
+            )
+        source_note = (
+            f" These contextual crops come from {support_image_count} source support image(s)."
+            if support_image_count != support_instance_count
+            else ""
+        )
+        return (
+            f"The image is a left-to-right collage of {support_instance_count} separate contextual crops containing "
+            f"target instances of the same object marked by red boxes.{source_note} Compare all marked instances and "
+            "describe the shared object traits that are useful for finding new instances. "
+        )
+
     def _build_description_prompt(self, support_image_count: int = 1, support_instance_count: int | None = None) -> str:
         """Build a prompt that asks for a support-conditioned visual description."""
         support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
         return (
             f"{self._boxed_support_layout_instruction(support_image_count, support_instance_count)}"
             "Red boxes mark the target object in each support example. "
-            "Write one compact object-level visual description that would help find matching instances in a new image. "
+            "Write one compact object-level visual description using only the smallest common denominator shared by "
+            "every red-boxed target instance. "
             "Start with a short generic object name inferred from appearance, then add the most useful reusable "
-            "visual traits of the target object itself: overall shape, visible parts, material, texture, color, "
-            "and distinctive structure. "
-            "Do not include details that appear in only one support unless they seem essential to the object type. "
-            "Do not describe the surrounding scene, mounting surface, position in the image, exact background, "
-            "red box, or support-image context. Return one short sentence only, with no bullets or analysis."
+            "visual traits of the target object itself that are visible in all marked examples: overall shape, core "
+            "parts, and distinctive structure. "
+            "Before answering, mentally discard any trait that is missing, hidden, uncertain, or only present in most "
+            "examples. Do not include color, material, texture, text, logos, markings, attachments, pose, viewpoint, "
+            "occlusion state, or fine details unless every target instance clearly shares them. "
+            "Do not describe the surrounding scene, mounting surface, position in the image, exact background, red box, "
+            "or support-image context. Return one short sentence only, with no bullets, caveats, or analysis."
         )
 
     def _build_crop_description_prompt(
@@ -435,12 +459,39 @@ class QwenVLMHandler:
         return (
             f"{self._cropped_support_layout_instruction(support_image_count, support_instance_count)}"
             "Each support example is cropped tightly around the target object. "
-            "Write one compact object-level visual description that would help find matching instances in a new image. "
+            "Write one compact object-level visual description using only the smallest common denominator shared by "
+            "every target crop. "
             "Start with a short generic object name inferred from appearance, then add the most useful reusable "
-            "visual traits of the target object itself: overall shape, visible parts, material, texture, color, "
-            "and distinctive structure. "
-            "Do not include details that appear in only one support unless they seem essential to the object type. "
-            "Return one short sentence only, with no bullets or analysis."
+            "visual traits of the target object itself that are visible in all crops: overall shape, core parts, and "
+            "distinctive structure. "
+            "Before answering, mentally discard any trait that is missing, hidden, uncertain, or only present in most "
+            "examples. Do not include color, material, texture, text, logos, markings, attachments, pose, viewpoint, "
+            "occlusion state, or fine details unless every target crop clearly shares them. "
+            "Return one short sentence only, with no bullets, caveats, or analysis."
+        )
+
+    def _build_contextual_crop_description_prompt(
+        self,
+        support_image_count: int = 1,
+        support_instance_count: int | None = None,
+    ) -> str:
+        """Build a prompt that asks for a description from contextual support crops."""
+        support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
+        return (
+            f"{self._contextual_cropped_support_layout_instruction(support_image_count, support_instance_count)}"
+            "Each support example is cropped with local context around the target object, and red boxes mark the "
+            "target object within that context. "
+            "Write one compact object-level visual description using only the smallest common denominator shared by "
+            "every red-boxed target instance. "
+            "Start with a short generic object name inferred from appearance, then add the most useful reusable "
+            "visual traits of the target object itself that are visible in all marked crops: overall shape, core "
+            "parts, and distinctive structure. "
+            "Before answering, mentally discard any trait that is missing, hidden, uncertain, or only present in most "
+            "examples. Do not include color, material, texture, text, logos, markings, attachments, pose, viewpoint, "
+            "occlusion state, or fine details unless every target instance clearly shares them. "
+            "Use surrounding context only to identify the target's generic object type, never as a detection "
+            "requirement. Do not include background, mounting surface, exact neighboring objects, red box, crop "
+            "boundary, or support-image context. Return one short sentence only, with no bullets, caveats, or analysis."
         )
 
     def _build_description_detection_prompt(
@@ -555,11 +606,6 @@ class QwenVLMHandler:
             thinking_text = thinking_text.replace("<think>", "").replace("</think>", "").strip()
             return output_text, thinking_text
 
-        if "</think>" in stripped_text:
-            thinking_text, output_text = stripped_text.rsplit("</think>", maxsplit=1)
-            thinking_text = thinking_text.replace("<think>", "").strip()
-            return output_text.strip(), thinking_text
-
         think_block_pattern = re.compile(r"<think>(.*?)</think>", flags=re.DOTALL)
         thinking_parts = [part.strip() for part in think_block_pattern.findall(stripped_text) if part.strip()]
         output_text = think_block_pattern.sub("", stripped_text).strip()
@@ -590,7 +636,9 @@ class QwenVLMHandler:
     @staticmethod
     def _close_unfinished_thinking(raw_output_text: str) -> str:
         """Return a continuation suffix that closes an unfinished thinking block."""
-        if "<think>" not in raw_output_text or "</think>" in raw_output_text:
+        last_think_start = raw_output_text.rfind("<think>")
+        last_think_end = raw_output_text.rfind("</think>")
+        if last_think_start == -1 or last_think_end > last_think_start:
             return ""
         return "\n</think>\n\n"
 
@@ -741,6 +789,34 @@ class QwenVLMHandler:
             f"{assistant_prefill}{thinking_generated_text}{forced_thinking_close}{answer_generated_text}"
         )
         output_text, thinking_text = self._split_thinking_output(raw_output_text)
+        restarted_thinking_close = self._close_unfinished_thinking(raw_output_text)
+        if not output_text and restarted_thinking_close:
+            final_continuation_prompt = f"{continuation_prompt}{answer_generated_text}{restarted_thinking_close}"
+            final_continuation_inputs = self.processor(
+                text=[final_continuation_prompt], images=images, return_tensors="pt"
+            )
+            final_continuation_inputs = {key: value.to(self.device) for key, value in final_continuation_inputs.items()}
+            with torch.no_grad():
+                final_answer_generated_ids = self.model.generate(
+                    **final_continuation_inputs,
+                    **generation_kwargs,
+                )
+
+            if "input_ids" in final_continuation_inputs:
+                prompt_length = final_continuation_inputs["input_ids"].shape[-1]
+                final_answer_generated_ids = final_answer_generated_ids[:, prompt_length:]
+
+            final_answer_generated_text = self.processor.batch_decode(
+                final_answer_generated_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )[0]
+            raw_output_text = self._clean_generated_text(
+                f"{assistant_prefill}{thinking_generated_text}{forced_thinking_close}"
+                f"{answer_generated_text}{restarted_thinking_close}{final_answer_generated_text}"
+            )
+            output_text, thinking_text = self._split_thinking_output(raw_output_text)
+
         if not output_text:
             fallback_result = self._generate_text_result(
                 image_pil=image_pil,
@@ -1066,6 +1142,7 @@ class QwenVLMHandler:
         thinking_mode: bool = False,
         thinking_max_new_tokens: int | None = None,
         cropped_support: bool = False,
+        contextual_cropped_support: bool = False,
         support_count: int | None = None,
         support_image_count: int = 1,
         support_instance_count: int | None = None,
@@ -1080,6 +1157,7 @@ class QwenVLMHandler:
             thinking_mode=thinking_mode,
             thinking_max_new_tokens=thinking_max_new_tokens,
             cropped_support=cropped_support,
+            contextual_cropped_support=contextual_cropped_support,
             support_count=support_count,
             support_image_count=support_image_count,
             support_instance_count=support_instance_count,
@@ -1096,6 +1174,7 @@ class QwenVLMHandler:
         thinking_mode: bool = False,
         thinking_max_new_tokens: int | None = None,
         cropped_support: bool = False,
+        contextual_cropped_support: bool = False,
         support_count: int | None = None,
         support_image_count: int = 1,
         support_instance_count: int | None = None,
@@ -1104,17 +1183,24 @@ class QwenVLMHandler:
         if support_count is not None:
             support_image_count = support_count
         support_instance_count = support_instance_count if support_instance_count is not None else support_image_count
-        prompt = (
-            self._build_crop_description_prompt(
+        if contextual_cropped_support:
+            prompt = self._build_contextual_crop_description_prompt(
                 support_image_count=support_image_count,
                 support_instance_count=support_instance_count,
             )
-            if cropped_support
-            else self._build_description_prompt(
+            support_prompt_strategy = "contextual_cropped"
+        elif cropped_support:
+            prompt = self._build_crop_description_prompt(
                 support_image_count=support_image_count,
                 support_instance_count=support_instance_count,
             )
-        )
+            support_prompt_strategy = "cropped"
+        else:
+            prompt = self._build_description_prompt(
+                support_image_count=support_image_count,
+                support_instance_count=support_instance_count,
+            )
+            support_prompt_strategy = "boxed"
         generation_result = self._generate_text_result(
             image_pil=support_image,
             prompt=prompt,
@@ -1128,6 +1214,8 @@ class QwenVLMHandler:
         return description, {
             "category_name": category_name,
             "cropped_support": cropped_support,
+            "contextual_cropped_support": contextual_cropped_support,
+            "support_prompt_strategy": support_prompt_strategy,
             "support_count": support_count or support_image_count,
             "support_image_count": support_image_count,
             "support_instance_count": support_instance_count,
@@ -1215,13 +1303,15 @@ class QwenVLMHandler:
 
         yes_ids = get_valid_ids(["Yes", " Yes", "yes", " yes", "YES", " YES"])
         no_ids = get_valid_ids(["No", " No", "no", " no", "NO", " NO"])
-        if not yes_ids: yes_ids = [self.yes_token_id]
-        if not no_ids: no_ids = [self.no_token_id]
+        if not yes_ids:
+            yes_ids = [self.yes_token_id]
+        if not no_ids:
+            no_ids = [self.no_token_id]
 
         scores = []
 
         from torchvision.transforms import functional as TF
-        
+
         for crop in crops:
             crop_cpu = crop.detach().cpu() if crop.device.type != "cpu" else crop
             crop_pil = TF.to_pil_image(crop_cpu)
@@ -1232,34 +1322,40 @@ class QwenVLMHandler:
             ]
             for img in support_images:
                 user_content.append({"type": "image", "image": img})
-            
-            user_content.append({"type": "text", "text": "\nFirst, describe the defining visual characteristics (core shape, parts, details) of the object shown in the references.\nNow look at this candidate crop:\n"})
+
+            user_content.append(
+                {
+                    "type": "text",
+                    "text": "\nFirst, describe the defining visual characteristics (core shape, parts, details) of the object shown in the references.\nNow look at this candidate crop:\n",
+                }
+            )
             user_content.append({"type": "image", "image": crop_pil})
-            user_content.append({"type": "text", "text": f"\nSecond, describe the object present in the candidate crop. Finally, carefully compare them to determine if the candidate crop is an instance of the '{category_name}' category shown in the references. It must structurally share the core defining characteristics, but details may vary. Do not write drafts or lists. Summarize your thoughts in a short paragraph, then state your final conclusion as exactly 'Yes' or 'No'."})
+            user_content.append(
+                {
+                    "type": "text",
+                    "text": f"\nSecond, describe the object present in the candidate crop. Finally, carefully compare them to determine if the candidate crop is an instance of the '{category_name}' category shown in the references. It must structurally share the core defining characteristics, but details may vary. Do not write drafts or lists. Summarize your thoughts in a short paragraph, then state your final conclusion as exactly 'Yes' or 'No'.",
+                }
+            )
 
             messages = [
                 {"role": "system", "content": "You are a precise visual evaluator."},
-                {"role": "user", "content": user_content}
+                {"role": "user", "content": user_content},
             ]
-            
+
             text_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = self.processor(text=[text_prompt], images=all_images, return_tensors="pt").to(self.device)
-            
+
             with torch.no_grad():
-                generated_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    repetition_penalty=1.1
-                )
-            
+                generated_ids = self.model.generate(**inputs, max_new_tokens=512, repetition_penalty=1.1)
+
             input_len = inputs["input_ids"].shape[1]
             raw_reasoning_text = self.processor.decode(generated_ids[0, input_len:], skip_special_tokens=True).strip()
-            
+
             output_text, thinking_text = self._split_thinking_output(raw_reasoning_text)
             # Fallback if split fails or outputs nothing
             if not output_text and not thinking_text:
                 output_text = raw_reasoning_text
-            
+
             reasoning_text = raw_reasoning_text
 
             # Pass 2: Extract binary score based on the reasoning context
@@ -1268,16 +1364,23 @@ class QwenVLMHandler:
                 {"role": "system", "content": "You are a precise visual evaluator."},
                 {"role": "user", "content": user_content},
                 {"role": "assistant", "content": raw_reasoning_text},
-                {"role": "user", "content": f"Based on this analysis, does the candidate share the core defining characteristics of the '{category_name}'? Answer only Yes or No."}
+                {
+                    "role": "user",
+                    "content": f"Based on this analysis, does the candidate share the core defining characteristics of the '{category_name}'? Answer only Yes or No.",
+                },
             ]
-            
-            scoring_prompt_text = self.processor.apply_chat_template(scoring_messages, tokenize=False, add_generation_prompt=True)
-            inputs_scoring = self.processor(text=[scoring_prompt_text], images=all_images, return_tensors="pt").to(self.device)
-            
+
+            scoring_prompt_text = self.processor.apply_chat_template(
+                scoring_messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs_scoring = self.processor(text=[scoring_prompt_text], images=all_images, return_tensors="pt").to(
+                self.device
+            )
+
             with torch.no_grad():
                 outputs = self.model(**inputs_scoring)
                 logits = outputs.logits[0, -1, :]
-                
+
                 yes_score = torch.logsumexp(logits[yes_ids], dim=0)
                 no_score = torch.logsumexp(logits[no_ids], dim=0)
 
@@ -1288,6 +1391,7 @@ class QwenVLMHandler:
             # Save the first crop and its reasoning as a debug sample
             if len(scores) == 1:
                 import os
+
                 os.makedirs("debug_verify_crops", exist_ok=True)
                 safe_name = category_name.replace(" ", "_").replace("/", "_")
                 crop_pil.save(f"debug_verify_crops/debug_{safe_name}.png")

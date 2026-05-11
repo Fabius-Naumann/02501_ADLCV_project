@@ -62,6 +62,20 @@ class _ThinkingBudgetProcessor:
         return ['[{"bbox_2d": [10, 20, 30, 40], "label": "target", "score": 0.9}]']
 
 
+class _RestartingThinkingBudgetProcessor(_ThinkingBudgetProcessor):
+    """Fake processor where continuation incorrectly starts a second unfinished think block."""
+
+    def batch_decode(self, generated_ids: torch.Tensor, **kwargs: Any) -> list[str]:
+        """Decode thinking, restarted thinking, and fallback generations."""
+        del generated_ids, kwargs
+        self.decode_calls += 1
+        if self.decode_calls == 1:
+            return ["First reasoning pass."]
+        if self.decode_calls == 2:
+            return ["<think>\nSecond unfinished reasoning pass."]
+        return ["A concise final object description."]
+
+
 class _FakeGenerateModel:
     """Fake model with a deterministic generate method."""
 
@@ -116,6 +130,24 @@ class QwenGenerationTest(unittest.TestCase):
 
         self.assertIn("bbox_2d", result.output_text)
         self.assertIn("bbox_2d", result.fallback_parser_input_text)
+        self.assertEqual(processor.decode_calls, 3)
+
+    def test_thinking_budget_continues_when_answer_phase_restarts_thinking(self) -> None:
+        """A second unfinished think block should be closed before final-answer generation."""
+        processor = _RestartingThinkingBudgetProcessor()
+        handler = _build_handler(processor)
+
+        result = handler._generate_text_result(
+            image_pil=Image.new("RGB", (8, 8)),
+            prompt="Describe the target.",
+            thinking_mode=True,
+            thinking_max_new_tokens=4,
+        )
+
+        self.assertEqual(result.output_text, "A concise final object description.")
+        self.assertEqual(result.fallback_parser_input_text, "")
+        self.assertNotIn("<think>", result.output_text)
+        self.assertIn("Second unfinished reasoning pass.", result.thinking_text)
         self.assertEqual(processor.decode_calls, 3)
 
 

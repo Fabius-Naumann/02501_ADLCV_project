@@ -7,7 +7,7 @@ DetGPT explores how off-the-shelf VLMs can perform few-shot object detection whe
 
 ## Task Roadmap
 * **Task 1: Zero-shot Performance**: Benchmarking VLMs (1-8B parameters) against SOTA detectors like **Grounding DINO** and **YOLO-World**.
-* **Task 2: In-Context Design**: Evaluating different layout strategies such as side-by-side images or cropped exemplars in 1-shot and 5-shot settings.
+* **Task 2: In-Context Design**: Evaluating different layout strategies such as side-by-side images, contextual crops, or cropped exemplars in 1-shot and 5-shot settings.
 * **Task 3: VLM + Detector Fusion**: Combining the visual understanding of VLMs with the precise localization of specialized detectors.
 
 
