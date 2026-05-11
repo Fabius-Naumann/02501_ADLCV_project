@@ -1201,34 +1201,103 @@ class QwenVLMHandler:
         return outputs
 
     def verify_crops(self, crops, support_images, category_name):
-        scores = []
-        support_tags = " ".join(["<|image_pad|>"] * len(support_images))
-        prompt = (
-            f"Here are reference examples of the target object ({category_name}):\n"
-            f"{support_tags}\n"
-            f"Now look at this candidate image:\n"
-            f"<|image_pad|>\n"
-            f"Does this candidate image strictly contain the exact target object shown in the references? "
-            f"Answer only Yes or No."
-        )
+        if not crops:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
 
+        # 1. Broaden Token Vocabulary for Robustness
+        def get_valid_ids(words):
+            valid_ids = []
+            for w in words:
+                tokens = self.processor.tokenizer.encode(w, add_special_tokens=False)
+                if len(tokens) == 1:
+                    valid_ids.append(tokens[0])
+            return list(set(valid_ids))
+
+        yes_ids = get_valid_ids(["Yes", " Yes", "yes", " yes", "YES", " YES"])
+        no_ids = get_valid_ids(["No", " No", "no", " no", "NO", " NO"])
+        if not yes_ids: yes_ids = [self.yes_token_id]
+        if not no_ids: no_ids = [self.no_token_id]
+
+        scores = []
+
+        from torchvision.transforms import functional as TF
+        
         for crop in crops:
             crop_cpu = crop.detach().cpu() if crop.device.type != "cpu" else crop
             crop_pil = TF.to_pil_image(crop_cpu)
             all_images = [*support_images, crop_pil]
 
-            inputs = self.processor(text=[prompt], images=all_images, return_tensors="pt").to(self.device)
+            user_content = [
+                {"type": "text", "text": f"Here are reference crops of the target object ({category_name}):\n"}
+            ]
+            for img in support_images:
+                user_content.append({"type": "image", "image": img})
+            
+            user_content.append({"type": "text", "text": "\nFirst, describe the defining visual characteristics (core shape, parts, details) of the object shown in the references.\nNow look at this candidate crop:\n"})
+            user_content.append({"type": "image", "image": crop_pil})
+            user_content.append({"type": "text", "text": f"\nSecond, describe the object present in the candidate crop. Finally, carefully compare them to determine if the candidate crop is an instance of the '{category_name}' category shown in the references. It must structurally share the core defining characteristics, but details may vary. Do not write drafts or lists. Summarize your thoughts in a short paragraph, then state your final conclusion as exactly 'Yes' or 'No'."})
 
+            messages = [
+                {"role": "system", "content": "You are a precise visual evaluator."},
+                {"role": "user", "content": user_content}
+            ]
+            
+            text_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(text=[text_prompt], images=all_images, return_tensors="pt").to(self.device)
+            
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    repetition_penalty=1.1
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            raw_reasoning_text = self.processor.decode(generated_ids[0, input_len:], skip_special_tokens=True).strip()
+            
+            output_text, thinking_text = self._split_thinking_output(raw_reasoning_text)
+            # Fallback if split fails or outputs nothing
+            if not output_text and not thinking_text:
+                output_text = raw_reasoning_text
+            
+            reasoning_text = raw_reasoning_text
+
+            # Pass 2: Extract binary score based on the reasoning context
+            # We append the model's generated text directly into the chat log as an assistant message
+            scoring_messages = [
+                {"role": "system", "content": "You are a precise visual evaluator."},
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": raw_reasoning_text},
+                {"role": "user", "content": f"Based on this analysis, does the candidate share the core defining characteristics of the '{category_name}'? Answer only Yes or No."}
+            ]
+            
+            scoring_prompt_text = self.processor.apply_chat_template(scoring_messages, tokenize=False, add_generation_prompt=True)
+            inputs_scoring = self.processor(text=[scoring_prompt_text], images=all_images, return_tensors="pt").to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs_scoring)
                 logits = outputs.logits[0, -1, :]
+                
+                yes_score = torch.logsumexp(logits[yes_ids], dim=0)
+                no_score = torch.logsumexp(logits[no_ids], dim=0)
 
-                # Isolated Binary Softmax for Yes/No
-                binary_probs = torch.softmax(torch.stack([logits[self.yes_token_id], logits[self.no_token_id]]), dim=0)
-                scores.append(binary_probs[0].item())
+                binary_probs = torch.softmax(torch.stack([yes_score, no_score]), dim=0)
+                yes_prob = binary_probs[0].item()
+                scores.append(yes_prob)
 
-        if not crops:
-            return torch.empty(0, dtype=torch.float32, device=self.device)
+            # Save the first crop and its reasoning as a debug sample
+            if len(scores) == 1:
+                import os
+                os.makedirs("debug_verify_crops", exist_ok=True)
+                safe_name = category_name.replace(" ", "_").replace("/", "_")
+                crop_pil.save(f"debug_verify_crops/debug_{safe_name}.png")
+                with open(f"debug_verify_crops/debug_{safe_name}.txt", "w", encoding="utf-8") as f:
+                    f.write(f"Category: {category_name}\n")
+                    if thinking_text:
+                        f.write(f"Thinking Traces:\n{thinking_text}\n\n")
+                    f.write(f"Reasoning:\n{output_text}\n\n")
+                    f.write(f"Final YES Probability: {yes_prob:.4f}\n")
+
         return torch.tensor(scores, dtype=torch.float32, device=self.device)
 
     def nms_duel(self, crop_a, crop_b, category_name):
