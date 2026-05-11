@@ -27,6 +27,9 @@ def _render_support_image(
 ) -> Tensor:
     """Render support image with annotation boxes for one target class only."""
     image_u8 = _to_uint8_image(image)
+    if type is None:
+        return image_u8
+
     boxes_any = target.get("boxes")
     category_names_any = target.get("category_names", [])
 
@@ -71,6 +74,45 @@ def _render_support_image(
     raise ValueError(f"Unsupported type '{type}'. Use 'box' or 'mark'.")
 
 
+def _support_list(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+) -> list[tuple[Tensor, dict[str, Any]]]:
+    """Normalize one or more support samples to a list."""
+    return [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
+
+
+def _category_names(target: dict[str, Any]) -> list[str]:
+    """Return string category names from a support target."""
+    category_names_any = target.get("category_names", [])
+    return [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
+
+
+def _selected_category_indices(target: dict[str, Any], support_category_name: str | None = None) -> list[int]:
+    """Return target indices matching the selected support category."""
+    boxes_any = target.get("boxes")
+    if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
+        return []
+
+    category_names = _category_names(target)
+    if support_category_name is None:
+        support_category_name = next((name for name in category_names if name.strip()), None)
+
+    if support_category_name is None:
+        return list(range(len(boxes_any)))
+
+    return [index for index, name in enumerate(category_names) if name == support_category_name]
+
+
+def count_support_instances(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+) -> int:
+    """Count target instances represented by the support samples."""
+    return sum(
+        len(_selected_category_indices(target, support_category_name)) for _, target in _support_list(n_support_img)
+    )
+
+
 def _resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
     """Resize an image to a shared height while preserving aspect ratio."""
     if image.height == target_height:
@@ -102,7 +144,7 @@ def side_by_side(
         Combined ``PIL.Image`` where support panels are left and the query is right
         when ``target_img`` is provided.
     """
-    supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
+    supports = _support_list(n_support_img)
 
     panels = [
         to_pil_image(_render_support_image(image, target, category_name=support_category_name, type=type))
@@ -138,7 +180,7 @@ def cropped_side_by_side(
     support_category_name: str | None = None,
     output_path: Path | None = None,
     spacing: int = 8,
-    type: str | None = "box",
+    type: str | None = None,
 ) -> Image.Image:
     """Compose support example(s) and an optional query image, cropping support to target class.
 
@@ -150,42 +192,44 @@ def cropped_side_by_side(
         support_category_name: Class name to annotate on support panels.
         output_path: Optional path to save the combined image.
         spacing: Horizontal spacing in pixels between panels.
+        type: Optional annotation type. Defaults to no annotation because the
+            crop already identifies the support instance.
     Returns:
         Combined ``PIL.Image`` with cropped support panels and an optional query image.
     """
     cropped_supports = []
-    for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
+    for image, target in _support_list(n_support_img):
         boxes_any = target.get("boxes")
-        category_names_any = target.get("category_names", [])
         if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
             continue
 
-        category_names = [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
-
-        if support_category_name is None:
-            support_category_name = next((name for name in category_names if name.strip()), None)
-
-        if support_category_name is None:
-            continue
-
-        selected_indices = [index for index, name in enumerate(category_names) if name == support_category_name]
+        selected_indices = _selected_category_indices(target, support_category_name)
         if not selected_indices:
             continue
 
-        selected_box = boxes_any[selected_indices[0]].unsqueeze(0)
-        box_xyxy = cxcywh_tensor_to_xyxy(selected_box).to(dtype=torch.int64)[0]
-
         _, height, width = image.shape
-        x_min = max(0, min(int(box_xyxy[0].item()), width))
-        y_min = max(0, min(int(box_xyxy[1].item()), height))
-        x_max = max(0, min(int(box_xyxy[2].item()), width))
-        y_max = max(0, min(int(box_xyxy[3].item()), height))
+        selected_boxes = boxes_any[selected_indices]
+        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
+        for box_xyxy in boxes_xyxy:
+            x_min = max(0, min(int(box_xyxy[0].item()), width))
+            y_min = max(0, min(int(box_xyxy[1].item()), height))
+            x_max = max(0, min(int(box_xyxy[2].item()), width))
+            y_max = max(0, min(int(box_xyxy[3].item()), height))
 
-        if x_max <= x_min or y_max <= y_min:
-            continue
+            if x_max <= x_min or y_max <= y_min:
+                continue
 
-        cropped_image = image[:, y_min:y_max, x_min:x_max]
-        cropped_supports.append((cropped_image, target))
+            cropped_image = image[:, y_min:y_max, x_min:x_max]
+            _, crop_height, crop_width = cropped_image.shape
+            cropped_target = {
+                "boxes": torch.tensor(
+                    [[crop_width / 2, crop_height / 2, crop_width, crop_height]],
+                    dtype=boxes_any.dtype,
+                    device=boxes_any.device,
+                ),
+                "category_names": [support_category_name] if support_category_name is not None else [],
+            }
+            cropped_supports.append((cropped_image, cropped_target))
 
     return side_by_side(
         target_img=target_img,
@@ -220,7 +264,7 @@ def marked_side_by_side(
         Combined ``PIL.Image`` with marked support panels and an optional query image.
     """
     marked_supports = []
-    for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
+    for image, target in _support_list(n_support_img):
         marked_image = _render_support_image(image, target, category_name=support_category_name, type=type)
         marked_supports.append((marked_image, target))
 
@@ -240,7 +284,7 @@ def supports_to_images(
     type: str | None = "box",
 ) -> list[Image.Image]:
     """Return a list of PIL.Images for each support sample (annotated per `type`)."""
-    supports = [n_support_img] if isinstance(n_support_img, tuple) else list(n_support_img)
+    supports = _support_list(n_support_img)
     images: list[Image.Image] = []
     for image, target in supports:
         rendered = _render_support_image(image, target, category_name=support_category_name, type=type)
@@ -254,21 +298,12 @@ def cropped_supports_to_images(
 ) -> list[Image.Image]:
     """Return cropped PIL.Images for each support sample containing the target class."""
     cropped_supports = []
-    for image, target in n_support_img if isinstance(n_support_img, list) else [n_support_img]:
+    for image, target in _support_list(n_support_img):
         boxes_any = target.get("boxes")
-        category_names_any = target.get("category_names", [])
         if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
             continue
 
-        category_names = [str(name) for name in category_names_any] if isinstance(category_names_any, list) else []
-
-        if support_category_name is None:
-            support_category_name = next((name for name in category_names if name.strip()), None)
-
-        if support_category_name is None:
-            continue
-
-        selected_indices = [index for index, name in enumerate(category_names) if name == support_category_name]
+        selected_indices = _selected_category_indices(target, support_category_name)
         if not selected_indices:
             continue
 

@@ -40,7 +40,7 @@ def prepare_dataset(
 @task
 def train(ctx: Context) -> None:
     """Train model."""
-    ctx.run(f"uv run src/{PROJECT_NAME}/train.py", echo=True, pty=not WINDOWS)
+    ctx.run(f"uv run python -m {PROJECT_NAME}.train", echo=True, pty=not WINDOWS)
 
 
 # Documentation commands

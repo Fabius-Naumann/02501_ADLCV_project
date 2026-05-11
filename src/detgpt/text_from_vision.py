@@ -16,10 +16,14 @@ from detgpt.box_utils import cxcywh_to_xyxy
 from detgpt.data import Task1DetectionDataset
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import QwenVLMHandler
-from detgpt.support_samples import find_support_indices, side_by_side
+from detgpt.support_samples import count_support_instances, cropped_side_by_side, find_support_indices, side_by_side
 
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 DEFAULT_CATEGORY_NAME = "knocker_(on_a_door)"
+SUPPORT_STRATEGY_BUILDERS = {
+    "side_by_side": side_by_side,
+    "cropped": cropped_side_by_side,
+}
 
 
 def _find_query_index(dataset: Task1DetectionDataset, category_name: str, query_index: int | None) -> int:
@@ -122,11 +126,24 @@ def run_text_from_vision_poc(
         help="Optional dataset index for the query image. If omitted, the first matching sample is used.",
     ),
     n_support: int = typer.Option(1, help="Number of support examples to compose."),
+    support_strategy: str = typer.Option(
+        "side_by_side",
+        help="Support presentation strategy for description generation: side_by_side or cropped.",
+    ),
     model_id: str = typer.Option(QWEN_DEFAULT_MODEL_ID, help="Qwen model id for generation and localization."),
     max_detections: int = typer.Option(1, help="Maximum detections returned by the VLM."),
     description_max_new_tokens: int = typer.Option(128, help="Maximum tokens for support description generation."),
     localization_max_new_tokens: int = typer.Option(256, help="Maximum tokens for localization generation."),
     temperature: float = typer.Option(0.0, help="Generation temperature."),
+    thinking_mode: bool = typer.Option(
+        False,
+        "--thinking-mode/--no-thinking-mode",
+        help="Enable Qwen thinking mode while keeping parser inputs free of thinking traces.",
+    ),
+    thinking_max_new_tokens: int | None = typer.Option(
+        512,
+        help="Optional token budget for Qwen thinking before final-answer generation.",
+    ),
     save_viz: bool = typer.Option(
         True,
         "--save-viz/--no-save-viz",
@@ -139,6 +156,12 @@ def run_text_from_vision_poc(
         raise typer.BadParameter("Unsupported split. Use 'train' or 'val'.")
     if n_support < 1:
         raise typer.BadParameter("--n-support must be at least 1.")
+    normalized_support_strategy = support_strategy.strip().lower()
+    if normalized_support_strategy not in SUPPORT_STRATEGY_BUILDERS:
+        supported_strategies = ", ".join(sorted(SUPPORT_STRATEGY_BUILDERS))
+        raise typer.BadParameter(f"Unsupported support strategy. Use one of: {supported_strategies}.")
+    if thinking_max_new_tokens is not None and thinking_max_new_tokens < 1:
+        raise typer.BadParameter("--thinking-max-new-tokens must be at least 1 when provided.")
 
     dataset = Task1DetectionDataset(split=normalized_split, to_float=True)
     resolved_query_index = _find_query_index(
@@ -159,12 +182,18 @@ def run_text_from_vision_poc(
 
     query_image, query_target = dataset[resolved_query_index]
     support_samples = [dataset[support_index] for support_index in support_indices]
+    support_image_count = len(support_samples)
+    support_instance_count = count_support_instances(
+        n_support_img=support_samples,
+        support_category_name=category_name,
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = OUTPUTS_DIR / "text_from_vision" / f"run_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    support_image = side_by_side(
+    support_builder = SUPPORT_STRATEGY_BUILDERS[normalized_support_strategy]
+    support_image = support_builder(
         target_img=None,
         n_support_img=support_samples,
         support_category_name=category_name,
@@ -172,11 +201,17 @@ def run_text_from_vision_poc(
     )
 
     vlm_handler = QwenVLMHandler(model_id=model_id)
-    generated_description = vlm_handler.generate_support_description(
+    use_cropped_description_prompt = normalized_support_strategy == "cropped"
+    generated_description, description_debug = vlm_handler.generate_support_description_debug(
         support_image=support_image,
         category_name=category_name,
         max_new_tokens=description_max_new_tokens,
         temperature=temperature,
+        thinking_mode=thinking_mode,
+        thinking_max_new_tokens=thinking_max_new_tokens,
+        cropped_support=use_cropped_description_prompt,
+        support_image_count=support_image_count,
+        support_instance_count=support_instance_count,
     )
     detections = vlm_handler.predict_from_description(
         image_tensor=query_image,
@@ -186,6 +221,8 @@ def run_text_from_vision_poc(
         max_new_tokens=localization_max_new_tokens,
         temperature=temperature,
         return_debug_outputs=True,
+        thinking_mode=thinking_mode,
+        thinking_max_new_tokens=thinking_max_new_tokens,
     )
 
     image_path = str(dataset.samples[resolved_query_index].get("local_path", ""))
@@ -208,8 +245,15 @@ def run_text_from_vision_poc(
             "split": normalized_split,
             "query_index": resolved_query_index,
             "support_indices": support_indices,
+            "support_image_count": support_image_count,
+            "support_instance_count": support_instance_count,
+            "support_strategy": normalized_support_strategy,
+            "description_prompt_strategy": "cropped" if use_cropped_description_prompt else "boxed",
             "model_id": model_id,
+            "thinking_mode": thinking_mode,
+            "thinking_max_new_tokens": thinking_max_new_tokens,
             "generated_description": generated_description,
+            "support_description_debug": description_debug,
             "debug_entries": detections.get("debug_entries", []),
         },
         run_dir / "run_summary.json",
