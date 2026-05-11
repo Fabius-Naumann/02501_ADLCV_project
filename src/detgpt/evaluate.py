@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import random
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from detgpt import OUTPUTS_DIR
 from detgpt.data import Task1DetectionDataset, task1_collate_fn
+from detgpt.fusion import FusionPipeline, visualize_fusion_comparison
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
 from detgpt.support_samples import (
@@ -26,9 +29,17 @@ from detgpt.support_samples import (
     side_by_side,
 )
 
-DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-base"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 YOLO_DEFAULT_MODEL_ID = "yolov8s-world.pt"
+
+FIXED_5_CLASSES = [
+    "oil_lamp",
+    "gravy_boat",
+    "quiche",
+    "knocker_(on_a_door)",
+    "mail_slot",
+]
 
 
 def _resolve_detector(
@@ -330,6 +341,145 @@ def _save_task2_results(
 
     logger.info("Saved Task 2 metrics to {}", metrics_path)
     logger.info("Saved Task 2 summary to {}", summary_path)
+
+
+def _sample_balanced_indices(
+    dataset: Task1DetectionDataset,
+    samples_per_class: int,
+    seed: int,
+    limit: int,
+) -> list[int]:
+    rng = random.Random(seed)
+
+    per_class: dict[str, list[int]] = defaultdict(list)
+
+    for index, sample in enumerate(dataset.samples):
+        classes = {
+            str(annotation.get("category_name", "")).strip()
+            for annotation in sample.get("annotations", [])
+            if str(annotation.get("category_name", "")).strip()
+        }
+
+        for class_name in classes:
+            per_class[class_name].append(index)
+
+    selected_indices: list[int] = []
+    used_indices: set[int] = set()
+
+    class_names = sorted(per_class)
+    logger.info("Balanced sampling over {} classes: {}", len(class_names), class_names)
+
+    for class_name in class_names:
+        candidate_indices = per_class[class_name][:]
+        rng.shuffle(candidate_indices)
+
+        added_for_class = 0
+        for index in candidate_indices:
+            if index in used_indices:
+                continue
+
+            selected_indices.append(index)
+            used_indices.add(index)
+            added_for_class += 1
+
+            if added_for_class >= samples_per_class:
+                break
+
+        logger.info(
+            "Selected {} unique images for class '{}' from {} candidates.",
+            added_for_class,
+            class_name,
+            len(candidate_indices),
+        )
+
+    rng.shuffle(selected_indices)
+
+    if limit > 0:
+        selected_indices = selected_indices[:limit]
+
+    logger.info("Balanced selected image count: {}", len(selected_indices))
+    return selected_indices
+
+
+def _sequential_indices(dataset: Task1DetectionDataset, limit: int) -> list[int]:
+    max_count = len(dataset) if limit <= 0 else min(limit, len(dataset))
+    return list(range(max_count))
+
+
+def _resolve_task1_categories(category_names: str) -> list[str]:
+    requested = _extract_query_categories(category_names.split(","))
+    return requested or FIXED_5_CLASSES
+
+
+def _filter_ground_truth_to_categories(
+    image_path: str,
+    target: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    boxes: list[list[float]] = []
+    labels: list[str] = []
+
+    for box, label in zip(target["boxes"], target["category_names"], strict=True):
+        label_text = str(label)
+        if label_text.casefold() not in allowed:
+            continue
+        boxes.append(box.detach().cpu().tolist())
+        labels.append(label_text)
+
+    return {"image_path": image_path, "boxes": boxes, "labels": labels}
+
+
+def _filter_detections_to_categories(
+    detections: dict[str, Any],
+    query_categories: list[str],
+) -> dict[str, Any]:
+    allowed = {category.casefold() for category in query_categories}
+    labels = [str(label) for label in detections["labels"]]
+    keep_indices = [index for index, label in enumerate(labels) if label.casefold() in allowed]
+
+    if not keep_indices:
+        return _empty_detections()
+
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+    filtered = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": detections["scores"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        filtered["debug_entries"] = detections["debug_entries"]
+
+    return filtered
+
+
+def _limit_detections_per_class(detections: dict[str, Any], max_per_class: int) -> dict[str, Any]:
+    if max_per_class <= 0 or len(detections["boxes"]) == 0:
+        return detections
+
+    labels = [str(label) for label in detections["labels"]]
+    scores = detections["scores"].detach().cpu().to(torch.float32)
+    keep_indices: list[int] = []
+
+    for label in sorted(set(labels)):
+        label_indices = [index for index, value in enumerate(labels) if value == label]
+        label_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+        keep_indices.extend(label_indices[:max_per_class])
+
+    keep_indices.sort(key=lambda index: float(scores[index]), reverse=True)
+    index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+
+    limited = {
+        "boxes": detections["boxes"].detach().cpu().index_select(0, index_tensor).to(torch.float32),
+        "scores": scores.index_select(0, index_tensor).to(torch.float32),
+        "labels": [labels[index] for index in keep_indices],
+    }
+
+    if "debug_entries" in detections:
+        limited["debug_entries"] = detections["debug_entries"]
+
+    return limited
 
 
 def _process_single_sample(
@@ -673,6 +823,248 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     return run_summary
 
 
+def _sample_balanced_indices_for_categories(
+    dataset: Task1DetectionDataset,
+    requested_categories: list[str],
+    samples_per_class: int,
+    seed: int,
+    limit: int,
+) -> list[int]:
+    """Sample query image indices approximately balanced over requested categories."""
+    if samples_per_class < 1:
+        raise typer.BadParameter("--samples-per-class must be at least 1.")
+
+    rng = random.Random(seed)
+    requested_cf = {category.casefold(): category for category in requested_categories}
+    per_class: dict[str, list[int]] = {category: [] for category in requested_categories}
+
+    for index, sample in enumerate(dataset.samples):
+        sample_classes = {
+            str(annotation.get("category_name", "")).strip()
+            for annotation in sample.get("annotations", [])
+            if str(annotation.get("category_name", "")).strip()
+        }
+        for sample_class in sample_classes:
+            canonical = requested_cf.get(sample_class.casefold())
+            if canonical is not None:
+                per_class[canonical].append(index)
+
+    selected_indices: list[int] = []
+    used_indices: set[int] = set()
+
+    for category in requested_categories:
+        candidate_indices = per_class.get(category, [])[:]
+        rng.shuffle(candidate_indices)
+
+        added_for_class = 0
+        for index in candidate_indices:
+            if index in used_indices:
+                continue
+            selected_indices.append(index)
+            used_indices.add(index)
+            added_for_class += 1
+            if added_for_class >= samples_per_class:
+                break
+
+        logger.info(
+            "Task 3 selected {} unique query image(s) for class '{}' from {} candidate image(s).",
+            added_for_class,
+            category,
+            len(candidate_indices),
+        )
+
+    rng.shuffle(selected_indices)
+    if limit > 0:
+        selected_indices = selected_indices[:limit]
+
+    logger.info("Task 3 selected {} total query image(s).", len(selected_indices))
+    return selected_indices
+
+
+def _empty_prediction_for_category(image_path: str) -> dict[str, Any]:
+    """Build an empty prediction record for one query/category pair."""
+    return {
+        "image_path": image_path,
+        "boxes": [],
+        "labels": [],
+        "scores": [],
+    }
+
+
+def run_task3_fusion_baseline(  # noqa: C901
+    query_split: str = typer.Option("train", help="Query split to evaluate: val or train."),
+    support_split: str = typer.Option("train", help="Support split for few-shot examples: val or train."),
+    limit: int = typer.Option(50, help="Maximum number of query images to evaluate. Use 0 for all selected."),
+    category_names: str = typer.Option(..., help="Comma-separated category names to evaluate."),
+    samples_per_class: int = typer.Option(10, help="Balanced query samples per requested class."),
+    balanced: bool = typer.Option(True, "--balanced/--no-balanced", help="Sample query images balanced over classes."),
+    seed: int = typer.Option(42, help="Random seed for balanced sampling."),
+    save_results: bool = typer.Option(True, "--save-results/--no-save-results", help="Save Task 3 metrics."),
+    save_viz: bool = typer.Option(False, "--save-viz/--no-save-viz", help="Save fusion visualizations."),
+) -> dict[str, Any]:
+    """Evaluate Task 3: DINO high-recall proposals + Qwen few-shot verification + VLM-guided NMS."""
+    normalized_query_split = query_split.strip().lower()
+    normalized_support_split = support_split.strip().lower()
+    if normalized_query_split not in {"val", "train"}:
+        raise typer.BadParameter("Unsupported query split. Use 'val' or 'train'.")
+    if normalized_support_split not in {"val", "train"}:
+        raise typer.BadParameter("Unsupported support split. Use 'val' or 'train'.")
+
+    requested_categories = _extract_query_categories(category_names.split(","))
+    if not requested_categories:
+        raise typer.BadParameter("--category-names must include at least one non-empty category name.")
+    requested_category_set = {category.casefold() for category in requested_categories}
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = OUTPUTS_DIR / "task3_results" / f"run_{timestamp}"
+    viz_dir = run_dir / "visualizations"
+    if save_results or save_viz:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    if save_viz:
+        viz_dir.mkdir(parents=True, exist_ok=True)
+
+    query_dataset = Task1DetectionDataset(split=normalized_query_split, to_float=True)
+    support_dataset = Task1DetectionDataset(split=normalized_support_split, to_float=True)
+
+    query_indices = (
+        _sample_balanced_indices_for_categories(
+            dataset=query_dataset,
+            requested_categories=requested_categories,
+            samples_per_class=samples_per_class,
+            seed=seed,
+            limit=limit,
+        )
+        if balanced
+        else _sequential_indices(query_dataset, limit)
+    )
+
+    pipeline = FusionPipeline()
+
+    predictions: list[dict[str, Any]] = []
+    ground_truth: list[dict[str, Any]] = []
+    summary_rows: list[dict[str, Any]] = []
+
+    for query_index in query_indices:
+        query_image, query_target = query_dataset[query_index]
+        image_path = str(query_dataset.samples[query_index].get("local_path", ""))
+        if not image_path:
+            logger.warning("Skipping Task 3 query index {} because local_path is missing.", query_index)
+            continue
+
+        query_categories = [
+            category
+            for category in _extract_query_categories(query_target["category_names"])
+            if category.casefold() in requested_category_set
+        ]
+
+        for category_name in query_categories:
+            image_key = f"{image_path}::query={query_index}::category={category_name}"
+            gt_record = _ground_truth_record_for_category(
+                image_path=image_key,
+                target=query_target,
+                category_name=category_name,
+            )
+            if not gt_record["boxes"]:
+                continue
+
+            support_query_index = query_index if normalized_support_split == normalized_query_split else -1
+            safe_category = category_name.replace("/", "_").replace("(", "").replace(")", "")
+            fusion_debug_dir = viz_dir / f"q{query_index:04d}_{safe_category}_fusion_steps" if save_viz else None
+            result = pipeline.run(
+                image_tensor=query_image,
+                category=category_name,
+                dataset=support_dataset,
+                query_index=support_query_index,
+                debug_dir=fusion_debug_dir,
+            )
+
+            if result is None or len(result.get("boxes", [])) == 0:
+                pred_record = _empty_prediction_for_category(image_key)
+                num_candidates = len(result.get("all_boxes", [])) if result is not None and "all_boxes" in result else 0
+                num_verified = 0
+            else:
+                detections = {
+                    "boxes": result["boxes"].detach().cpu().to(torch.float32),
+                    "scores": result["scores"].detach().cpu().to(torch.float32),
+                    "labels": [category_name] * len(result["boxes"]),
+                }
+                pred_record = _prediction_record(
+                    image_path=image_key,
+                    backend="grounding_dino",
+                    detections=detections,
+                )
+                num_candidates = len(result.get("all_boxes", [])) if "all_boxes" in result else len(result["boxes"])
+                num_verified = len(result["boxes"])
+
+                if save_viz and "all_boxes" in result and "keep_indices" in result and "vlm_scores" in result:
+                    visualize_fusion_comparison(
+                        query_image,
+                        result["all_boxes"],
+                        result["keep_indices"],
+                        result["vlm_scores"],
+                        category_name,
+                        viz_dir / f"q{query_index:04d}_{safe_category}_fusion.png",
+                    )
+
+            predictions.append(pred_record)
+            ground_truth.append(gt_record)
+            summary_rows.append(
+                {
+                    "query_index": query_index,
+                    "category": category_name,
+                    "num_gt": len(gt_record["boxes"]),
+                    "num_candidates": num_candidates,
+                    "num_verified": num_verified,
+                }
+            )
+
+            logger.info(
+                "Task 3 query_index={} class='{}': gt={}, candidates={}, verified={}",
+                query_index,
+                category_name,
+                len(gt_record["boxes"]),
+                num_candidates,
+                num_verified,
+            )
+
+    metrics = evaluate_dataset(predictions=predictions, ground_truth=ground_truth)
+    run_summary = {
+        "query_split": normalized_query_split,
+        "support_split": normalized_support_split,
+        "limit": limit,
+        "balanced": balanced,
+        "samples_per_class": samples_per_class,
+        "requested_categories": requested_categories,
+        "num_eval_pairs": len(predictions),
+        "metrics": metrics,
+    }
+
+    if save_results:
+        with (run_dir / "task3_metrics.json").open("w", encoding="utf-8") as file_handle:
+            json.dump(run_summary, file_handle, indent=2)
+        with (run_dir / "task3_predictions.json").open("w", encoding="utf-8") as file_handle:
+            json.dump(predictions, file_handle, indent=2)
+        with (run_dir / "task3_ground_truth.json").open("w", encoding="utf-8") as file_handle:
+            json.dump(ground_truth, file_handle, indent=2)
+        with (run_dir / "task3_summary.csv").open("w", newline="", encoding="utf-8") as file_handle:
+            writer = csv.DictWriter(
+                file_handle,
+                fieldnames=["query_index", "category", "num_gt", "num_candidates", "num_verified"],
+            )
+            writer.writeheader()
+            writer.writerows(summary_rows)
+        logger.info("Saved Task 3 outputs to {}", run_dir)
+
+    logger.info(
+        "Task 3 fusion AP50={:.4f}, AP75={:.4f}, mean_AP_50_75={:.4f}",
+        float(metrics["AP50"]["ap"]),
+        float(metrics["AP75"]["ap"]),
+        float(metrics["mean_AP_50_75"]),
+    )
+
+    return run_summary
+
+
 def run_task1_baseline(
     split: str = typer.Option("val", help="Dataset split to evaluate: val or train."),
     limit: int = typer.Option(20, help="Number of samples to evaluate."),
@@ -807,6 +1199,11 @@ def run_task1_baseline(
     )
 
 
+app = typer.Typer()
+app.command("task1")(run_task1_baseline)
+app.command("task2")(run_task2_support_strategy_baseline)
+app.command("task3")(run_task3_fusion_baseline)
+
+
 if __name__ == "__main__":
-    # typer.run(run_task1_baseline)
-    typer.run(run_task2_support_strategy_baseline)
+    app()
