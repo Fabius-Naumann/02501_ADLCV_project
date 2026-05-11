@@ -307,20 +307,20 @@ def cropped_supports_to_images(
         if not selected_indices:
             continue
 
-        _, height, width = image.shape
         selected_boxes = boxes_any[selected_indices]
         boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
-        for box_xyxy in boxes_xyxy:
-            x_min = max(0, min(int(box_xyxy[0].item()), width))
-            y_min = max(0, min(int(box_xyxy[1].item()), height))
-            x_max = max(0, min(int(box_xyxy[2].item()), width))
-            y_max = max(0, min(int(box_xyxy[3].item()), height))
 
-            if x_max <= x_min or y_max <= y_min:
-                continue
-            cropped_image = image[:, y_min:y_max, x_min:x_max]
-            img_u8 = _to_uint8_image(cropped_image)
-            cropped_supports.append(to_pil_image(img_u8))
+        _, height, width = image.shape
+        x_min = max(0, min(boxes_xyxy[:, 0].min().item(), width))
+        y_min = max(0, min(boxes_xyxy[:, 1].min().item(), height))
+        x_max = max(0, min(boxes_xyxy[:, 2].max().item(), width))
+        y_max = max(0, min(boxes_xyxy[:, 3].max().item(), height))
+
+        if x_max <= x_min or y_max <= y_min:
+            continue
+        cropped_image = image[:, y_min:y_max, x_min:x_max]
+        img_u8 = _to_uint8_image(cropped_image)
+        cropped_supports.append(to_pil_image(img_u8))
 
     return cropped_supports
 
