@@ -22,6 +22,7 @@ from detgpt.fusion import FusionPipeline, visualize_fusion_comparison
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler, YOLOWorldHandler
 from detgpt.support_samples import (
+    contextual_cropped_side_by_side,
     cropped_side_by_side,
     find_support_indices,
     marked_side_by_side,
@@ -629,6 +630,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     qwen_handler = QwenVLMHandler(model_id=qwen_model_id)
     qwen_task2_detection_system_prompts = {
         "side_by_side": qwen_handler._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
+        "contextual_crops": qwen_handler._TASK2_OBJECT_DETECTION_BOUNDED_BOXES,
         "cropped_exemplars": qwen_handler._TASK2_OBJECT_DETECTION_CROPPED,
         "set_of_mark_visual": qwen_handler._TASK2_OBJECT_DETECTION_MARKED,
     }
@@ -636,6 +638,7 @@ def run_task2_support_strategy_baseline(  # noqa: C901
     # Map strategy names to their panel builder functions (target_img=None for support panel only)
     strategy_builders = {
         "side_by_side": side_by_side,
+        "contextual_crops": contextual_cropped_side_by_side,
         "cropped_exemplars": cropped_side_by_side,
         "set_of_mark_visual": marked_side_by_side,
     }
@@ -965,11 +968,14 @@ def run_task3_fusion_baseline(  # noqa: C901
                 continue
 
             support_query_index = query_index if normalized_support_split == normalized_query_split else -1
+            safe_category = category_name.replace("/", "_").replace("(", "").replace(")", "")
+            fusion_debug_dir = viz_dir / f"q{query_index:04d}_{safe_category}_fusion_steps" if save_viz else None
             result = pipeline.run(
                 image_tensor=query_image,
                 category=category_name,
                 dataset=support_dataset,
                 query_index=support_query_index,
+                debug_dir=fusion_debug_dir,
             )
 
             if result is None or len(result.get("boxes", [])) == 0:
@@ -991,7 +997,6 @@ def run_task3_fusion_baseline(  # noqa: C901
                 num_verified = len(result["boxes"])
 
                 if save_viz and "all_boxes" in result and "keep_indices" in result and "vlm_scores" in result:
-                    safe_category = category_name.replace("/", "_").replace("(", "").replace(")", "")
                     visualize_fusion_comparison(
                         query_image,
                         result["all_boxes"],

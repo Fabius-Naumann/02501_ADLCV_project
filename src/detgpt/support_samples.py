@@ -10,7 +10,7 @@ from torchvision.transforms.functional import to_pil_image
 from torchvision.utils import draw_bounding_boxes
 
 from detgpt import FIGURES_DIR
-from detgpt.box_utils import cxcywh_tensor_to_xyxy
+from detgpt.box_utils import clip_xyxy_to_image, cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset
 
 
@@ -113,6 +113,99 @@ def count_support_instances(
     )
 
 
+def _expand_crop_bounds(
+    x_min: int,
+    y_min: int,
+    x_max: int,
+    y_max: int,
+    width: int,
+    height: int,
+    padding_ratio: float,
+    min_padding: int,
+) -> tuple[int, int, int, int]:
+    """Expand clipped ``xyxy`` bounds by a relative and minimum pixel padding."""
+    box_width = x_max - x_min
+    box_height = y_max - y_min
+    x_padding = max(min_padding, round(box_width * padding_ratio))
+    y_padding = max(min_padding, round(box_height * padding_ratio))
+    crop_x_min = max(0, x_min - x_padding)
+    crop_y_min = max(0, y_min - y_padding)
+    crop_x_max = min(width, x_max + x_padding)
+    crop_y_max = min(height, y_max + y_padding)
+    return crop_x_min, crop_y_min, crop_x_max, crop_y_max
+
+
+def _support_instance_crops(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+    padding_ratio: float = 0.0,
+    min_padding: int = 0,
+    target_box_fills_crop: bool = False,
+) -> list[tuple[Tensor, dict[str, Any]]]:
+    """Extract support instance crops and rewrite target boxes into crop-local coordinates."""
+    if padding_ratio < 0:
+        raise ValueError("padding_ratio must be non-negative.")
+    if min_padding < 0:
+        raise ValueError("min_padding must be non-negative.")
+
+    cropped_supports = []
+    for image, target in _support_list(n_support_img):
+        boxes_any = target.get("boxes")
+        if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
+            continue
+
+        selected_indices = _selected_category_indices(target, support_category_name)
+        if not selected_indices:
+            continue
+
+        category_names = _category_names(target)
+        _, height, width = image.shape
+        selected_boxes = boxes_any[selected_indices]
+        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
+        for selected_index, box_xyxy in zip(selected_indices, boxes_xyxy, strict=True):
+            x_min, y_min, x_max, y_max = clip_xyxy_to_image(box_xyxy, width=width, height=height)
+
+            if x_max <= x_min or y_max <= y_min:
+                continue
+
+            crop_x_min, crop_y_min, crop_x_max, crop_y_max = _expand_crop_bounds(
+                x_min=x_min,
+                y_min=y_min,
+                x_max=x_max,
+                y_max=y_max,
+                width=width,
+                height=height,
+                padding_ratio=padding_ratio,
+                min_padding=min_padding,
+            )
+            cropped_image = image[:, crop_y_min:crop_y_max, crop_x_min:crop_x_max]
+            _, crop_height, crop_width = cropped_image.shape
+
+            if target_box_fills_crop:
+                crop_box = [crop_width / 2, crop_height / 2, crop_width, crop_height]
+            else:
+                target_width = x_max - x_min
+                target_height = y_max - y_min
+                crop_box = [
+                    (x_min + x_max) / 2 - crop_x_min,
+                    (y_min + y_max) / 2 - crop_y_min,
+                    target_width,
+                    target_height,
+                ]
+
+            cropped_target = {
+                "boxes": torch.tensor([crop_box], dtype=boxes_any.dtype, device=boxes_any.device),
+                "category_names": [
+                    category_names[selected_index]
+                    if selected_index < len(category_names) and category_names[selected_index].strip()
+                    else support_category_name or ""
+                ],
+            }
+            cropped_supports.append((cropped_image, cropped_target))
+
+    return cropped_supports
+
+
 def _resize_to_height(image: Image.Image, target_height: int) -> Image.Image:
     """Resize an image to a shared height while preserving aspect ratio."""
     if image.height == target_height:
@@ -197,43 +290,60 @@ def cropped_side_by_side(
     Returns:
         Combined ``PIL.Image`` with cropped support panels and an optional query image.
     """
-    cropped_supports = []
-    for image, target in _support_list(n_support_img):
-        boxes_any = target.get("boxes")
-        if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
-            continue
-
-        selected_indices = _selected_category_indices(target, support_category_name)
-        if not selected_indices:
-            continue
-
-        _, height, width = image.shape
-        selected_boxes = boxes_any[selected_indices]
-        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
-        for box_xyxy in boxes_xyxy:
-            x_min = max(0, min(int(box_xyxy[0].item()), width))
-            y_min = max(0, min(int(box_xyxy[1].item()), height))
-            x_max = max(0, min(int(box_xyxy[2].item()), width))
-            y_max = max(0, min(int(box_xyxy[3].item()), height))
-
-            if x_max <= x_min or y_max <= y_min:
-                continue
-
-            cropped_image = image[:, y_min:y_max, x_min:x_max]
-            _, crop_height, crop_width = cropped_image.shape
-            cropped_target = {
-                "boxes": torch.tensor(
-                    [[crop_width / 2, crop_height / 2, crop_width, crop_height]],
-                    dtype=boxes_any.dtype,
-                    device=boxes_any.device,
-                ),
-                "category_names": [support_category_name] if support_category_name is not None else [],
-            }
-            cropped_supports.append((cropped_image, cropped_target))
+    cropped_supports = _support_instance_crops(
+        n_support_img=n_support_img,
+        support_category_name=support_category_name,
+        target_box_fills_crop=True,
+    )
 
     return side_by_side(
         target_img=target_img,
         n_support_img=cropped_supports,
+        support_category_name=support_category_name,
+        output_path=output_path,
+        spacing=spacing,
+        type=type,
+    )
+
+
+def contextual_cropped_side_by_side(
+    target_img: Tensor | None,
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+    output_path: Path | None = None,
+    spacing: int = 8,
+    type: str | None = "box",
+    padding_ratio: float = 0.75,
+    min_padding: int = 32,
+) -> Image.Image:
+    """Compose support example(s) using crops with local context around each target.
+
+    Args:
+        target_img: Optional query image tensor (``C x H x W``) without annotations.
+        n_support_img: One or more support tuples of ``(image, target)``.
+            Support ``target`` must contain ``boxes`` in ``cxcywh`` and may include
+            ``category_names`` for label text.
+        support_category_name: Class name to annotate on support panels.
+        output_path: Optional path to save the combined image.
+        spacing: Horizontal spacing in pixels between panels.
+        type: Optional annotation type for the target within the contextual crop.
+        padding_ratio: Fraction of the target box size to include as padding on each side.
+        min_padding: Minimum number of pixels to include as padding on each side.
+
+    Returns:
+        Combined ``PIL.Image`` with contextual support crops and an optional query image.
+    """
+    contextual_supports = _support_instance_crops(
+        n_support_img=n_support_img,
+        support_category_name=support_category_name,
+        padding_ratio=padding_ratio,
+        min_padding=min_padding,
+        target_box_fills_crop=False,
+    )
+
+    return side_by_side(
+        target_img=target_img,
+        n_support_img=contextual_supports,
         support_category_name=support_category_name,
         output_path=output_path,
         spacing=spacing,
@@ -297,32 +407,33 @@ def cropped_supports_to_images(
     support_category_name: str | None = None,
 ) -> list[Image.Image]:
     """Return cropped PIL.Images for each support sample containing the target class."""
-    cropped_supports = []
-    for image, target in _support_list(n_support_img):
-        boxes_any = target.get("boxes")
-        if not isinstance(boxes_any, Tensor) or boxes_any.numel() == 0:
-            continue
+    return [
+        to_pil_image(_to_uint8_image(cropped_image))
+        for cropped_image, _ in _support_instance_crops(
+            n_support_img=n_support_img,
+            support_category_name=support_category_name,
+            target_box_fills_crop=True,
+        )
+    ]
 
-        selected_indices = _selected_category_indices(target, support_category_name)
-        if not selected_indices:
-            continue
 
-        selected_boxes = boxes_any[selected_indices]
-        boxes_xyxy = cxcywh_tensor_to_xyxy(selected_boxes).to(dtype=torch.int64)
-
-        _, height, width = image.shape
-        x_min = max(0, min(boxes_xyxy[:, 0].min().item(), width))
-        y_min = max(0, min(boxes_xyxy[:, 1].min().item(), height))
-        x_max = max(0, min(boxes_xyxy[:, 2].max().item(), width))
-        y_max = max(0, min(boxes_xyxy[:, 3].max().item(), height))
-
-        if x_max <= x_min or y_max <= y_min:
-            continue
-        cropped_image = image[:, y_min:y_max, x_min:x_max]
-        img_u8 = _to_uint8_image(cropped_image)
-        cropped_supports.append(to_pil_image(img_u8))
-
-    return cropped_supports
+def contextual_cropped_supports_to_images(
+    n_support_img: list[tuple[Tensor, dict[str, Any]]] | tuple[Tensor, dict[str, Any]],
+    support_category_name: str | None = None,
+    padding_ratio: float = 0.75,
+    min_padding: int = 32,
+) -> list[Image.Image]:
+    """Return contextual cropped PIL.Images for each support sample containing the target class."""
+    return [
+        to_pil_image(_render_support_image(cropped_image, target, category_name=support_category_name, type="box"))
+        for cropped_image, target in _support_instance_crops(
+            n_support_img=n_support_img,
+            support_category_name=support_category_name,
+            padding_ratio=padding_ratio,
+            min_padding=min_padding,
+            target_box_fills_crop=False,
+        )
+    ]
 
 
 def marked_supports_to_images(
@@ -406,6 +517,18 @@ if __name__ == "__main__":
     )
 
     print(f"Saved cropped combined image to: {FIGURES_DIR / 'support_query_cropped_side_by_side.png'}")
+
+    combined_contextual = contextual_cropped_side_by_side(
+        target_img=query_img,
+        n_support_img=support_samples,
+        support_category_name=chosen_category,
+        output_path=FIGURES_DIR / "support_query_contextual_cropped_side_by_side.png",
+    )
+
+    print(
+        "Saved contextual cropped combined image to: "
+        f"{FIGURES_DIR / 'support_query_contextual_cropped_side_by_side.png'}"
+    )
 
     combined_marked = marked_side_by_side(
         target_img=query_img,

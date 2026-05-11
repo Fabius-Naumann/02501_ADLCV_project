@@ -1,7 +1,42 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 from torch import Tensor
+
+
+def clip_xyxy_to_image(
+    box_xyxy: Tensor | Sequence[float],
+    width: int,
+    height: int,
+    padding: int = 0,
+) -> tuple[int, int, int, int]:
+    """Clip one ``xyxy`` box to image boundaries.
+
+    Args:
+        box_xyxy: Bounding box in ``[x1, y1, x2, y2]`` format.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        padding: Optional pixels to expand each side before clipping.
+
+    Returns:
+        Integer ``(x1, y1, x2, y2)`` bounds clipped to the image.
+    """
+    if padding < 0:
+        raise ValueError("padding must be non-negative.")
+
+    if isinstance(box_xyxy, Tensor):
+        x1, y1, x2, y2 = [int(value) for value in box_xyxy.detach().cpu().flatten()[:4].tolist()]
+    else:
+        x1, y1, x2, y2 = [int(value) for value in box_xyxy[:4]]
+
+    return (
+        max(0, min(x1 - padding, width)),
+        max(0, min(y1 - padding, height)),
+        max(0, min(x2 + padding, width)),
+        max(0, min(y2 + padding, height)),
+    )
 
 
 def xywh_to_cxcywh(box: list[float]) -> list[float]:

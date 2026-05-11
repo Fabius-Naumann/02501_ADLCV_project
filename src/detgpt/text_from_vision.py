@@ -16,12 +16,19 @@ from detgpt.box_utils import cxcywh_to_xyxy
 from detgpt.data import Task1DetectionDataset
 from detgpt.metrics import evaluate_dataset
 from detgpt.model import QwenVLMHandler
-from detgpt.support_samples import count_support_instances, cropped_side_by_side, find_support_indices, side_by_side
+from detgpt.support_samples import (
+    contextual_cropped_side_by_side,
+    count_support_instances,
+    cropped_side_by_side,
+    find_support_indices,
+    side_by_side,
+)
 
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 DEFAULT_CATEGORY_NAME = "knocker_(on_a_door)"
 SUPPORT_STRATEGY_BUILDERS = {
     "side_by_side": side_by_side,
+    "contextual_cropped": contextual_cropped_side_by_side,
     "cropped": cropped_side_by_side,
 }
 
@@ -128,7 +135,7 @@ def run_text_from_vision_poc(
     n_support: int = typer.Option(1, help="Number of support examples to compose."),
     support_strategy: str = typer.Option(
         "side_by_side",
-        help="Support presentation strategy for description generation: side_by_side or cropped.",
+        help="Support presentation strategy for description generation: side_by_side, contextual_cropped, or cropped.",
     ),
     model_id: str = typer.Option(QWEN_DEFAULT_MODEL_ID, help="Qwen model id for generation and localization."),
     max_detections: int = typer.Option(1, help="Maximum detections returned by the VLM."),
@@ -202,6 +209,14 @@ def run_text_from_vision_poc(
 
     vlm_handler = QwenVLMHandler(model_id=model_id)
     use_cropped_description_prompt = normalized_support_strategy == "cropped"
+    use_contextual_cropped_description_prompt = normalized_support_strategy == "contextual_cropped"
+    description_prompt_strategy = (
+        "contextual_cropped"
+        if use_contextual_cropped_description_prompt
+        else "cropped"
+        if use_cropped_description_prompt
+        else "boxed"
+    )
     generated_description, description_debug = vlm_handler.generate_support_description_debug(
         support_image=support_image,
         category_name=category_name,
@@ -210,6 +225,7 @@ def run_text_from_vision_poc(
         thinking_mode=thinking_mode,
         thinking_max_new_tokens=thinking_max_new_tokens,
         cropped_support=use_cropped_description_prompt,
+        contextual_cropped_support=use_contextual_cropped_description_prompt,
         support_image_count=support_image_count,
         support_instance_count=support_instance_count,
     )
@@ -248,7 +264,7 @@ def run_text_from_vision_poc(
             "support_image_count": support_image_count,
             "support_instance_count": support_instance_count,
             "support_strategy": normalized_support_strategy,
-            "description_prompt_strategy": "cropped" if use_cropped_description_prompt else "boxed",
+            "description_prompt_strategy": description_prompt_strategy,
             "model_id": model_id,
             "thinking_mode": thinking_mode,
             "thinking_max_new_tokens": thinking_max_new_tokens,
