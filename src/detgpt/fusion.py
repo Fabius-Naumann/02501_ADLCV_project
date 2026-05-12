@@ -13,12 +13,14 @@ import torch
 import torchvision.transforms.functional as TF
 from loguru import logger
 from torchvision.ops import box_iou
+import json
 
 from detgpt import FIGURES_DIR
 from detgpt.box_utils import clip_xyxy_to_image, cxcywh_tensor_to_xyxy
 from detgpt.data import Task1DetectionDataset
 from detgpt.model import GroundingDINOHandler, QwenVLMHandler
 from detgpt.support_samples import find_support_indices, side_by_side
+from detgpt.device import DeviceSpec, resolve_torch_device
 
 DINO_DEFAULT_MODEL_ID = "IDEA-Research/grounding-dino-base"
 QWEN_DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
@@ -435,22 +437,39 @@ def visualize_fusion_comparison(
 
 if __name__ == "__main__":
     import argparse
-
-    parser = argparse.ArgumentParser(description="Run the Fusion Pipeline")
-    parser.add_argument("--category", type=str, default="bread", help="The object category to detect.")
-    parser.add_argument(
-        "--image-index", type=int, default=None, help="The dataset index to use as query image (Optional)."
+    from detgpt.support_samples import (
+        contextual_cropped_side_by_side,
+        cropped_side_by_side,
+        side_by_side,
     )
+
+    SUPPORT_STRATEGY_BUILDERS = {
+        "side_by_side": side_by_side,
+        "contextual_cropped": contextual_cropped_side_by_side,
+        "cropped": cropped_side_by_side,
+    }
+
+    parser = argparse.ArgumentParser(description="Run the Fusion Pipeline for Ablation Studies")
+    parser.add_argument("--category", type=str, default="bread", help="The object category to detect.")
+    parser.add_argument("--image-index", type=int, default=None, help="The dataset index to use as query image.")
+    
+    # --- ABLATION STUDY ARGUMENTS ---
+    parser.add_argument("--qwen-model-id", type=str, default=QWEN_DEFAULT_MODEL_ID, help="HuggingFace Qwen Model ID")
+    parser.add_argument("--support-strategy", type=str, default="cropped", choices=SUPPORT_STRATEGY_BUILDERS.keys())
+    parser.add_argument("--thinking-mode", action="store_true", help="Enable Chain-of-Thought for the VLM")
+    
     args = parser.parse_args()
 
-    pipeline = FusionPipeline()
-    dataset = Task1DetectionDataset(split="train")
+    # Pass the dynamic model ID directly into the new init!
+    pipeline = FusionPipeline(qwen_model_id=args.qwen_model_id)
+    
+    # Use "val" split for faster testing/ablations
+    dataset = Task1DetectionDataset(split="val") 
 
     test_cat = args.category
 
     img_idx = args.image_index
     if img_idx is None:
-        # Find an image that contains the test category
         query_indices = find_support_indices(dataset, test_cat, query_index=-1, n_support=1)
         if not query_indices:
             raise ValueError(f"No images found containing category '{test_cat}' in the dataset.")
@@ -465,8 +484,11 @@ if __name__ == "__main__":
         logger.warning(f"No support samples found for category '{test_cat}'. Falling back to default prompt.")
         prompt = None
     else:
-        support_collage_path = FIGURES_DIR / f"support_collage_{img_idx}_{test_cat}.png"
-        support_collage = side_by_side(
+        # Dynamically build the support canvas based on CLI arg
+        support_builder = SUPPORT_STRATEGY_BUILDERS[args.support_strategy]
+        support_collage_path = FIGURES_DIR / f"support_{args.support_strategy}_{img_idx}_{test_cat}.png"
+        
+        support_collage = support_builder(
             target_img=None,
             n_support_img=support_samples,
             support_category_name=test_cat,
@@ -474,9 +496,31 @@ if __name__ == "__main__":
         )
         logger.info(f"Saved support collage to {support_collage_path}")
 
-        # 2. Generate the "Optimal Query"
-        logger.info("Generating optimal text prompt from support images...")
-        prompt = pipeline.qwen.generate_crop_support_description(support_collage, test_cat)
+        # Generate the Prompt using Debug logic (enables thinking and precise prompting)
+        logger.info(f"Generating prompt using strategy: {args.support_strategy} | Thinking: {args.thinking_mode}")
+        
+        use_cropped = args.support_strategy == "cropped"
+        use_contextual = args.support_strategy == "contextual_cropped"
+        
+        prompt, thinking_trace = pipeline.qwen.generate_support_description_debug(
+            support_image=support_collage,
+            category_name=test_cat,
+            thinking_mode=args.thinking_mode,
+            cropped_support=use_cropped,
+            contextual_cropped_support=use_contextual
+        )
+        if args.thinking_mode and thinking_trace:
+            # Convert the dictionary into a beautiful, indented string
+            formatted_trace = json.dumps(thinking_trace, indent=2)
+            
+            logger.info(f"\n=== VLM THINKING PROCESS ===\n{thinking_trace.get("thinking_text", "No thoughts recorded.")}\n============================")
+            
+            # Save it as a .json file instead of .txt
+            trace_filename = f"fusion_{args.support_strategy}_thinking_trace_{test_cat}.json"
+            trace_path = FIGURES_DIR / trace_filename
+            trace_path.write_text(formatted_trace, encoding="utf-8")
+            logger.info(f"Saved thinking trace to {trace_path}")
+
         logger.info(f"VLM Generated Description: {prompt}")
 
     result = pipeline.run(
@@ -488,13 +532,19 @@ if __name__ == "__main__":
         debug_dir=FIGURES_DIR,
     )
 
-    if result is not None:
+    if result is not None and result["count"] > 0:
         logger.success("Fusion finished. Found {} verified {} detection(s).", result["count"], test_cat)
+        
+        # Dynamic save name so your ablation outputs don't overwrite each other
+        save_name = f"fusion_{args.support_strategy}_{'thinking' if args.thinking_mode else 'nothinking'}_{test_cat}.png"
+        
         visualize_fusion_comparison(
             image,
             result["all_boxes"],
             result["keep_indices"],
             result["vlm_scores"],
             test_cat,
-            FIGURES_DIR / f"fusion_debug_comparison_{test_cat}.png",
+            FIGURES_DIR / save_name,
         )
+    else:
+        logger.warning(f"Pipeline finished but found 0 verified instances of '{test_cat}'.")
